@@ -1,13 +1,13 @@
 {
   "domain": "hai_shower",
   "name": "Hai Shower",
-  "codeowners": ["@gitcak"],
   "bluetooth": [
     {
       "connectable": true,
       "local_name": "haiSmartShower"
     }
   ],
+  "codeowners": ["@gitcak"],
   "config_flow": true,
   "dependencies": ["bluetooth", "recorder"],
   "documentation": "https://github.com/gitcak/ha-hai-shower",
