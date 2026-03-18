@@ -64,6 +64,7 @@ What to try:
 Current status:
 
 - Post-shower recovery is validated on the clean path
+- Standalone alert writes (water threshold, LED colors) are live-validated
 - Extended multi-shower proxy stability is still under validation
 
 ## Symptom: `ble_disconnected_during_refresh`

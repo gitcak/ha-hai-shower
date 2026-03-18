@@ -45,16 +45,18 @@ Notable implementation work already folded into the current v0.1 tree:
   local 250-record persistence cap is applied
 - Config-entry recovery flows added for both cloud-key reauthentication and
   BLE address correction without reinstall
+- Alert-setting writes (water threshold, LED colors) live-validated on
+  hardware — payloads confirmed correct, no disconnects during write
 - Setup guide and BLE troubleshooting guide added
 
 ## Known Limitations
 
-- Standalone alert-setting writes (water threshold, LED colors) are
-  live-validated on real hardware. Composite `led_config` writes (temperature
-  threshold + enable toggles) are unit-tested but not yet exercised live.
-  - Composite `led_config` writes still do not read back app-side peer enable
-    states; the runtime now warns when it has to assume an unknown peer bit as
-    disabled
+- Standalone alert-setting writes (water threshold, water LED color,
+  temperature LED color) are live-validated on real hardware. Composite
+  `led_config` writes (temperature threshold + enable toggles) are unit-tested
+  but not yet exercised live.
+  - Composite `led_config` writes do not read back app-side peer enable states;
+    the runtime warns when it has to assume an unknown peer bit as disabled
 - Firmware version is not reliably readable through the ESPHome proxy path
   - The firmware sensor is disabled by default
 - Cloud history import is not implemented

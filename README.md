@@ -60,7 +60,7 @@ To confirm you've selected the right physical showerhead, compare the Product ID
 | Last shower water usage | Volume used in the most recent completed shower |
 | Last shower avg temperature | Average temperature of the most recent completed shower |
 
-Temperature and volume sensors automatically adapt to your Home Assistant unit system (metric or imperial).
+All temperature, volume, and flow sensors automatically adapt to your Home Assistant unit system. If your instance is set to imperial, you'll see °F, gallons, and gal/min without any extra configuration. You can also override units per-entity in the entity settings.
 
 ### Alert Settings
 

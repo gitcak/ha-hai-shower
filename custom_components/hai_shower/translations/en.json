@@ -72,6 +72,7 @@
       "no_selectable_devices": "No selectable Hai devices were returned for this account.",
       "not_supported": "This Bluetooth discovery is not a supported Hai shower.",
       "unknown_error": "An unexpected error occurred during setup.",
+      "unique_id_mismatch": "This shower is already configured with a different entry.",
       "wrong_device": "The selected Hai account does not contain the configured shower.",
       "reconfigure_successful": "The Bluetooth address was updated.",
       "reauth_successful": "The device encryption key was refreshed successfully."

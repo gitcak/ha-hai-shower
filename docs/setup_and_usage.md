@@ -103,23 +103,31 @@ and creates the device/entities.
 - Address correction does not require deleting and re-adding the integration;
   the integration migrates its stable IDs and persisted usage data forward.
 
+## Unit System
+
+The integration reports all values in metric units natively (°C, liters, L/min).
+Home Assistant automatically converts these to imperial units (°F, gallons,
+gal/min) if your instance is configured for the US customary system. You can
+also override units per-entity in the entity settings if you prefer a specific
+unit regardless of the system-wide setting.
+
 ## What You Get
 
 ### Live BLE sensors
 
-- Water temperature
-- Water flow rate
-- Battery
+- Water temperature (°C / °F)
+- Water flow rate (L/min / gal/min)
+- Battery voltage (mV)
 - Session duration
-- Session volume
+- Session volume (L / gal)
 
 ### Session-derived sensors
 
-- Total water usage
+- Total water usage (L / gal)
 - Shower count
 - Last shower duration
-- Last shower water usage
-- Last shower average temperature
+- Last shower water usage (L / gal)
+- Last shower average temperature (°C / °F)
 
 ### Actions
 
@@ -156,8 +164,12 @@ read back into Home Assistant automatically.
 - Firmware version is not reliably readable through the ESPHome proxy path
   because the proxy cannot satisfy the required BLE security level
   - The firmware sensor is disabled by default
-- Changes made in the Hai phone app are not synced back to Home Assistant yet
-- Cloud history import (retroactive backfill) is not implemented in v0.1
+- Changes made in the Hai phone app are not synced back to Home Assistant
+- Cloud history import (retroactive backfill of old sessions) is not
+  implemented in v0.1
+- Composite alert writes (temperature threshold + enable toggles) are
+  unit-tested but not yet live-validated; standalone writes (water threshold,
+  LED colors) are confirmed working on hardware
 
 ## Diagnostics
 
