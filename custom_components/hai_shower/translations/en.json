@@ -1,0 +1,146 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add Hai shower",
+        "description": "Set up a Hai Smart Shower using nearby Bluetooth discovery. If your shower is not listed, enter its Bluetooth address manually. To confirm the correct shower in the Hai app, open My Hai > Product Info and compare the Product ID.",
+        "data": {
+          "discovered_device": "Discovered shower",
+          "address": "Bluetooth address",
+          "name": "Name"
+        }
+      },
+      "confirm_discovery": {
+        "title": "Confirm discovered shower",
+        "description": "Home Assistant discovered a nearby Hai shower: {name} at {address}. Confirm the device name, then continue to Hai cloud login so the integration can match the shower's Product ID to the cloud serial.",
+        "data": {
+          "name": "Name"
+        }
+      },
+      "cloud_login": {
+        "title": "Hai cloud login",
+        "description": "Sign in with your Hai account to fetch the device encryption key. This is a one-time step; your credentials are not stored. BLE address: {address}",
+        "data": {
+          "username": "Email",
+          "password": "Password"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Refresh Hai cloud bootstrap",
+        "description": "Sign in with your Hai account again to refresh the stored device encryption key for {name}. BLE address: {address}",
+        "data": {
+          "username": "Email",
+          "password": "Password"
+        }
+      },
+      "reconfigure_confirm": {
+        "title": "Correct Bluetooth address",
+        "description": "Update the Bluetooth address Home Assistant should use for {name}. If the shower is nearby, you can select it from discovery instead of typing the address manually.",
+        "data": {
+          "discovered_device": "Discovered shower",
+          "address": "Bluetooth address",
+          "name": "Name"
+        }
+      },
+      "select_device": {
+        "title": "Select device",
+        "description": "Choose which Hai device corresponds to this showerhead.",
+        "data": {
+          "device": "Device"
+        }
+      }
+    },
+    "error": {
+      "invalid_address": "The Bluetooth address is invalid.",
+      "no_address": "Select a discovered shower or enter a Bluetooth address.",
+      "choose_one_address": "Choose a discovered shower or enter a Bluetooth address, not both.",
+      "address_in_use": "Another Hai shower entry already uses that Bluetooth address.",
+      "auth_failed": "Hai cloud authentication failed. Check your credentials.",
+      "cannot_connect": "Unable to reach the Hai cloud service right now.",
+      "invalid_api_response": "Hai returned data in an unexpected format.",
+      "unknown_error": "An unexpected error occurred.",
+      "no_devices": "No devices found on this Hai account.",
+      "invalid_device": "Invalid device selection."
+    },
+    "abort": {
+      "already_configured": "This Hai shower is already configured.",
+      "auth_failed": "Hai cloud authentication expired during setup. Start setup again.",
+      "cannot_connect": "Unable to reach the Hai cloud service right now. Try again later.",
+      "device_fetch_failed": "Failed to fetch the selected Hai device details.",
+      "invalid_api_response": "Hai returned device data in an unexpected format.",
+      "invalid_device_key": "Hai returned device key data that this integration cannot use yet.",
+      "no_selectable_devices": "No selectable Hai devices were returned for this account.",
+      "not_supported": "This Bluetooth discovery is not a supported Hai shower.",
+      "unknown_error": "An unexpected error occurred during setup.",
+      "wrong_device": "The selected Hai account does not contain the configured shower.",
+      "reconfigure_successful": "The Bluetooth address was updated.",
+      "reauth_successful": "The device encryption key was refreshed successfully."
+    }
+  },
+  "entity": {
+    "button": {
+      "history_sync": {
+        "name": "History sync"
+      }
+    },
+    "number": {
+      "water_alert_threshold": {
+        "name": "Water-use alert threshold"
+      },
+      "temp_alert_threshold": {
+        "name": "Temperature alert threshold"
+      }
+    },
+    "select": {
+      "water_led_color": {
+        "name": "Water alert LED color"
+      },
+      "temp_led_color": {
+        "name": "Temperature alert LED color"
+      }
+    },
+    "switch": {
+      "water_alert_enabled": {
+        "name": "Water-use alert"
+      },
+      "temp_alert_enabled": {
+        "name": "Temperature alert"
+      }
+    },
+    "sensor": {
+      "current_temperature": {
+        "name": "Water temperature"
+      },
+      "current_flow": {
+        "name": "Water flow rate"
+      },
+      "total_water_usage": {
+        "name": "Total water usage"
+      },
+      "shower_count": {
+        "name": "Shower count"
+      },
+      "last_session_duration": {
+        "name": "Last shower duration"
+      },
+      "last_session_volume": {
+        "name": "Last shower water usage"
+      },
+      "last_session_avg_temp": {
+        "name": "Last shower avg temperature"
+      },
+      "session_duration": {
+        "name": "Session duration"
+      },
+      "session_volume": {
+        "name": "Session volume"
+      },
+      "battery": {
+        "name": "Battery"
+      },
+      "firmware_version": {
+        "name": "Firmware version"
+      }
+    }
+  }
+}

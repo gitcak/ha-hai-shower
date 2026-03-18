@@ -1,0 +1,43 @@
+name: Release Hai Shower
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Extract integration version
+        id: version
+        run: |
+          version=$(python - <<'PY'
+          import json
+          from pathlib import Path
+          manifest = json.loads(Path("custom_components/hai_shower/manifest.json").read_text())
+          print(manifest["version"])
+          PY
+          )
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build release package
+        run: |
+          zip -r "hai_shower-${{ steps.version.outputs.version }}.zip" custom_components/hai_shower
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hai_shower-${{ steps.version.outputs.version }}
+          path: hai_shower-${{ steps.version.outputs.version }}.zip
+
+      - name: Publish GitHub release asset
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: hai_shower-${{ steps.version.outputs.version }}.zip

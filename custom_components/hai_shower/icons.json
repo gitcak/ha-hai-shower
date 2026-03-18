@@ -1,0 +1,49 @@
+{
+  "entity": {
+    "button": {
+      "history_sync": {
+        "default": "mdi:download-network"
+      }
+    },
+    "number": {
+      "water_alert_threshold": {
+        "default": "mdi:water-plus"
+      },
+      "temp_alert_threshold": {
+        "default": "mdi:thermometer-chevron-up"
+      }
+    },
+    "select": {
+      "water_led_color": {
+        "default": "mdi:palette"
+      },
+      "temp_led_color": {
+        "default": "mdi:palette-outline"
+      }
+    },
+    "switch": {
+      "water_alert_enabled": {
+        "default": "mdi:water-alert",
+        "state": {
+          "off": "mdi:water-alert-outline",
+          "on": "mdi:water-alert"
+        }
+      },
+      "temp_alert_enabled": {
+        "default": "mdi:thermometer-alert",
+        "state": {
+          "off": "mdi:thermometer-off",
+          "on": "mdi:thermometer-alert"
+        }
+      }
+    },
+    "sensor": {
+      "shower_count": {
+        "default": "mdi:counter"
+      },
+      "firmware_version": {
+        "default": "mdi:chip"
+      }
+    }
+  }
+}

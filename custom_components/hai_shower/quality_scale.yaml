@@ -1,0 +1,13 @@
+rules:
+  config_flow: done
+  diagnostics: done
+  discovery: done
+  docs_high_level_description: done
+  docs_installation_instructions: done
+  docs_removal_instructions: done
+  entity_translations: done
+  has_entity_name: done
+  icon_translations: done
+  reauthentication_flow: done
+  reconfigure_flow: done
+  unique_config_entry: done
