@@ -38,6 +38,16 @@ jobs:
             exit 1
           fi
 
+      - name: Resolve release notes path
+        id: notes
+        run: |
+          notes_path="release_notes/v${{ steps.version.outputs.version }}.md"
+          if [ ! -f "$notes_path" ]; then
+            echo "Missing release notes file: $notes_path"
+            exit 1
+          fi
+          echo "path=$notes_path" >> "$GITHUB_OUTPUT"
+
       - name: Build release package
         run: |
           zip -r "hai_shower-${{ steps.version.outputs.version }}.zip" custom_components/hai_shower
@@ -53,4 +63,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: hai_shower-${{ steps.version.outputs.version }}.zip
-          body_path: release_notes.md
+          body_path: ${{ steps.notes.outputs.path }}
