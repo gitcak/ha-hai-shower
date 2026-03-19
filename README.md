@@ -1,6 +1,6 @@
 # Hai Shower for Home Assistant
 
-A local-first Home Assistant integration for the [Hai Smart Shower](https://www.hai.com/). After a one-time cloud login during setup, all communication with the showerhead happens locally over Bluetooth — no cloud dependency at runtime.
+A local-first Home Assistant integration for the [Hai Smart Shower](https://www.gethai.com/). After a one-time cloud login during setup, all communication with the showerhead happens locally over Bluetooth, so no cloud dependency at runtime.
 
 ## Support
 
@@ -16,8 +16,8 @@ If the button doesn't render on GitHub, use this link: https://www.buymeacoffee.
 - Automatic session tracking with duration, volume, and average temperature
 - Usage history synced from the showerhead and stored locally
 - Long-term statistics for the HA Energy dashboard (water usage and shower count)
-- Writable alert settings — thresholds, LED colors, and enable toggles
-- Works through an ESPHome Bluetooth proxy (no direct host Bluetooth required)
+- Writable alert settings — thresholds, LED colors, and enable toggles (WIP)
+- Works through an ESPHome Bluetooth proxy
 
 ## Requirements
 
