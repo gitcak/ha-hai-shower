@@ -29,6 +29,15 @@ jobs:
           )
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
+      - name: Validate tag matches manifest version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          expected_tag="v${{ steps.version.outputs.version }}"
+          if [ "${GITHUB_REF_NAME}" != "$expected_tag" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match manifest version ${{ steps.version.outputs.version }}"
+            exit 1
+          fi
+
       - name: Build release package
         run: |
           zip -r "hai_shower-${{ steps.version.outputs.version }}.zip" custom_components/hai_shower
