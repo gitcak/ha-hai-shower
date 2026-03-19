@@ -2,14 +2,6 @@
 
 A local-first Home Assistant integration for the [Hai Smart Shower](https://www.gethai.com/). After a one-time cloud login during setup, all communication with the showerhead happens locally over Bluetooth, so no cloud dependency at runtime.
 
-## Support
-
-If this project helped you, consider buying a coffee:
-
-If the button doesn't render on GitHub, use this link: https://www.buymeacoffee.com/nikcamajy
-
-<script type="text/javascript" src="https://cdnjs.buymeacoffee.com/1.0.0/button.prod.min.js" data-name="bmc-button" data-slug="nikcamajy" data-color="#FFDD00" data-emoji=""  data-font="Poppins" data-text="Buy me a coffee (beer)" data-outline-color="#000000" data-font-color="#000000" data-coffee-color="#ffffff" ></script>
-
 ## What It Does
 
 - Live water temperature, flow rate, and battery monitoring during showers
@@ -133,6 +125,10 @@ For more detail, see the [BLE troubleshooting guide](docs/troubleshooting_ble_pr
 3. Restart Home Assistant
 
 Existing recorder history will remain until HA purges it naturally.
+
+## Agentic Coding
+
+This project used Claude and Codex as coding assistants for portions of the implementation and documentation. They could not, however, take the long showers multiple times a day while holding a cellphone like some sort of heathen to debug or do any of the physical human things required to get this project released.
 
 ## License
 
