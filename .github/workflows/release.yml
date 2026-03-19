@@ -53,3 +53,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: hai_shower-${{ steps.version.outputs.version }}.zip
+          body_path: release_notes.md
