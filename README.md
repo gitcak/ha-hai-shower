@@ -190,67 +190,6 @@ Existing recorder history will remain until HA purges it naturally.
 
 ---
 
-## Prior Art
-
-When this project started, no existing Home Assistant integration for the Hai
-Smart Shower could be found. Two related projects were later discovered:
-
-### hydrao-dump (kamaradclimber, ~2020)
-
-A Python script and Wireshark dissector for the older **Hydrao**-branded
-shower heads (the predecessor to Hai). It reads a handful of GATT
-characteristics (`0x0012` volumes, `0x001a` temperature, `0x001e` flow) as
-**plaintext** — no encryption, no pairing, no cloud login. The Hydrao devices
-use the Bluetooth SIG base UUID range (`0000caXX-...`) and expose data
-openly to any BLE client. The script publishes readings to MQTT on a 2-second
-poll loop. No write support, no history sync, no Home Assistant integration.
-
-- Repo: [https://github.com/kamaradclimber/hydrao-dump](https://github.com/kamaradclimber/hydrao-dump)
-- Approach: BLE-only, plaintext reads, no auth
-- Status: last updated ~2020
-
-### hai-homeassistant (taylorfinnell, Feb 2024)
-
-A Home Assistant custom integration for Hai showers, forked from the
-[adizanni/hydrao](https://github.com/adizanni/hydrao) HA integration. It
-connects via BLE with a **hardcoded XOR key** (`[1, 2, 3, 4, 5, 6]`),
-bypassing cloud login entirely. It exposes 8 read-only sensor entities
-(temperature, volume, duration for current and last session). No write
-support, no history sync, no flow rate, no LED or alert configuration.
-
-- Repo: [https://github.com/taylorfinnell/hai-homeassistant](https://github.com/taylorfinnell/hai-homeassistant)
-- Approach: BLE-only, hardcoded XOR key, no cloud login
-- Entities: 8 read-only sensors
-- Status: 6 commits over 4 days (Feb 14–18, 2024), abandoned since. Zero
-tests, zero stars/forks, no HACS support.
-
-### How this integration differs
-
-
-| Capability          | hydrao-dump            | hai-homeassistant    | **Hai Shower (this)**            |
-| ------------------- | ---------------------- | -------------------- | -------------------------------- |
-| Connection          | BLE plaintext          | BLE + hardcoded key  | Cloud bootstrap + BLE            |
-| Auth method         | None                   | None (hardcoded key) | Cognito SRP → per-device key     |
-| Encryption          | None (Hydrao era)      | XOR `[1,2,3,4,5,6]`  | XOR with cloud-provisioned key   |
-| Sensors             | 3 (volume, temp, flow) | 8 (read-only)        | 10+ (read + write)               |
-| Write support       | No                     | No                   | Alerts, LED colors, thresholds   |
-| History sync        | No                     | No                   | Full session download + backfill |
-| HA Energy dashboard | No                     | No                   | Yes (water usage statistics)     |
-| Unit conversion     | No                     | Hardcoded mL         | Full metric/imperial via HA      |
-| Tests               | 0                      | 0                    | 107                              |
-| HACS ready          | No                     | No                   | Yes                              |
-| Active development  | No (~2020)             | No (Feb 2024)        | Yes                              |
-
-
-The taylorfinnell integration independently confirms several BLE
-characteristic UUIDs and the XOR cipher format, serving as third-party
-validation of the protocol reverse engineering that this integration is
-built on. The hardcoded key `[1, 2, 3, 4, 5, 6]` appears to be a universal
-factory default — this integration fetches the key from the cloud API as
-the robust, forward-proof approach in case Hai ever issues per-device keys.
-
----
-
 ## Agentic Coding
 
 This project used Claude and Codex as coding assistants for portions of the
@@ -258,6 +197,10 @@ implementation and documentation. They could not, however, take the long
 showers multiple times a day while holding a cellphone like some sort of
 heathen to debug or do any of the physical human things required to get this
 project released.
+
+---
+
+[![Buy Me a Coffee](https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=☕&slug=nikcamaju&button_colour=ff8800&font_colour=000000&font_family=Lato&outline_colour=000000&coffee_colour=FFDD00)](https://buymeacoffee.com/nikcamaj)
 
 ---
 
