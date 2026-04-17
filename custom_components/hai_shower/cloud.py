@@ -223,20 +223,6 @@ class HaiCloudClient:
         }
 
 
-    async def get_shower_history(self, device_id: str) -> list[dict[str, Any]]:
-        """Fetch shower session history from the cloud API.
-
-        Phase 2 stub: the ``showers/{id}`` endpoint structure is not yet
-        confirmed.  Returns an empty list until the request/response contract
-        is traced and live-validated.
-        """
-        _LOGGER.warning(
-            "Phase 2 stub: cloud history import for %s not implemented",
-            short_id(device_id),
-        )
-        return []
-
-
 class HaiCloudAuthError(Exception):
     """Raised when Hai cloud authentication fails."""
 

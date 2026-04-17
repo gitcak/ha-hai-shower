@@ -175,8 +175,6 @@ For more detail, see the
 disabled by default)
 - **App-side alert changes** made in the Hai phone app are not synced back to
 Home Assistant yet
-- **Cloud history import** (retroactive backfill of old sessions) is not
-implemented in v0.1
 
 ---
 

@@ -1,34 +1,38 @@
 # Hai Shower Setup and Usage
 
-This guide covers setup and the entities exposed by the Hai Shower Home
-Assistant integration.
+This guide covers the supported setup paths for the Hai Shower Home Assistant
+integration and the entities it exposes once configured.
 
 ## Before You Start
 
 You need:
 
 - Home Assistant with Bluetooth support
-- An ESPHome Bluetooth proxy within range of the shower (or host Bluetooth)
+- An ESPHome Bluetooth proxy within range of the shower
 - A Hai account username and password for the one-time setup bootstrap
 - The Hai shower powered on and advertising over BLE
 
 What the cloud login is used for:
 
 - Setup fetches the per-device encryption key from Hai's API
-- Credentials are used only during setup — they are not stored
-- Normal telemetry, history sync, and alert-setting control are all local BLE
+- Credentials are used only during setup bootstrap
+- Normal telemetry, history sync, and alert-setting control are local BLE
 
 ## Installation
 
+Supported install paths:
+
 ### HACS
 
-1. Add this repository as a custom repository in HACS
-2. Search for "Hai Shower" and install
-3. Restart Home Assistant
+1. Add `https://github.com/gitcak/ha-hai-shower` as a custom repository in
+   HACS.
+2. Search for `Hai Shower`.
+3. Install the integration from HACS.
+4. Restart Home Assistant.
 
 ### Manual
 
-1. Copy `custom_components/hai_shower` into your Home Assistant
+1. Copy `integration/custom_components/hai_shower` into your Home Assistant
    `custom_components` directory.
 2. Restart Home Assistant.
 3. Confirm the ESPHome Bluetooth proxy is online and the shower is in range.
@@ -101,33 +105,25 @@ and creates the device/entities.
 - Use Home Assistant's reconfigure flow if the shower's BLE address changes or
   needs to be corrected.
 - Address correction does not require deleting and re-adding the integration;
-  the integration migrates its stable IDs and persisted usage data forward.
-
-## Unit System
-
-The integration reports all values in metric units natively (°C, liters, L/min).
-Home Assistant automatically converts these to imperial units (°F, gallons,
-gal/min) if your instance is configured for the US customary system. You can
-also override units per-entity in the entity settings if you prefer a specific
-unit regardless of the system-wide setting.
+  the integration now migrates its stable IDs and persisted usage data forward.
 
 ## What You Get
 
 ### Live BLE sensors
 
-- Water temperature (°C / °F)
-- Water flow rate (L/min / gal/min)
-- Battery voltage (mV)
+- Water temperature
+- Water flow rate
+- Battery
 - Session duration
-- Session volume (L / gal)
+- Session volume
 
 ### Session-derived sensors
 
-- Total water usage (L / gal)
+- Total water usage
 - Shower count
 - Last shower duration
-- Last shower water usage (L / gal)
-- Last shower average temperature (°C / °F)
+- Last shower water usage
+- Last shower average temperature
 
 ### Actions
 
@@ -144,9 +140,13 @@ unit regardless of the system-wide setting.
 - Water alert enable switch
 - Temperature alert enable switch
 
-Alert values written from Home Assistant are stored in config entry options
-and restored on restart. Changes made directly in the Hai app are not yet
-read back into Home Assistant automatically.
+Phase 2 persistence is implemented for HA-managed alert values:
+
+- Values written from Home Assistant are stored in config entry options
+- Those values are restored on restart
+- App-side changes made outside Home Assistant are not yet read back into HA
+
+For release/version alignment details, see `docs/release_process.md`.
 
 ## Runtime Behavior
 
@@ -163,13 +163,13 @@ read back into Home Assistant automatically.
 
 - Firmware version is not reliably readable through the ESPHome proxy path
   because the proxy cannot satisfy the required BLE security level
-  - The firmware sensor is disabled by default
-- Changes made in the Hai phone app are not synced back to Home Assistant
-- Cloud history import (retroactive backfill of old sessions) is not
-  implemented in v0.1
-- Composite alert writes (temperature threshold + enable toggles) are
-  unit-tested but not yet live-validated; standalone writes (water threshold,
-  LED colors) are confirmed working on hardware
+  - The firmware sensor is therefore disabled by default
+- Alert-setting writes are implemented and unit-tested, but broader real-
+  hardware spot-check coverage is still limited
+  - Composite `led_config` writes still do not read back app-side peer enable
+    states. The runtime now warns when it has to assume an unknown peer bit as
+    disabled.
+- Multi-shower extended stability validation is still in progress
 
 ## Diagnostics
 
