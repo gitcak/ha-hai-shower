@@ -902,23 +902,21 @@ class HaiShowerBleClient:
         Some settings are not yet readable from the device, so composite writes
         use in-memory fallbacks until readback is validated.
 
-        WARNING: enable states default to ``False`` when they have never been
-        set (``None``).  This means a composite write triggered by a threshold
-        or color change will send the enable bitmask as 0 (both LEDs inactive)
-        if the user has not explicitly toggled the switches in this HA session.
-        Settings previously configured through the Hai app will be overridden.
-        This is a known gap that will be resolved once config readback is
-        validated on real hardware.
+        Enable states default to ``True`` when they have never been set
+        (``None``), matching the official Hai app's factory defaults
+        (``isWaterUseLightEnabled: true``, ``isWaterTempLightEnabled: true``).
+        This ensures composite writes do not accidentally disable the shower
+        LED when the user has only changed a threshold or color.
         """
         water_enabled = (
             self._state.water_alert_enabled
             if self._state.water_alert_enabled is not None
-            else False
+            else True
         )
         temp_enabled = (
             self._state.temp_alert_enabled
             if self._state.temp_alert_enabled is not None
-            else False
+            else True
         )
         return {
             "water_threshold_ml": int(
@@ -964,14 +962,28 @@ class HaiShowerBleClient:
         ):
             assumed_targets.append("temperature")
         if assumed_targets:
-            _LOGGER.warning(
+            _LOGGER.debug(
                 "Composite alert write on %s is assuming %s alert enable state(s) "
-                "as disabled because device-side readback is not implemented yet",
+                "as enabled (matching Hai app factory defaults) because device-side "
+                "readback is not implemented yet",
                 self.address,
                 ", ".join(assumed_targets),
             )
         settings = self._alert_defaults()
         settings.update(overrides)
+        _LOGGER.debug(
+            "Composite alert config on %s: water_threshold_ml=%d temp_threshold_cc=%d "
+            "water_alert_enabled=%s temp_alert_enabled=%s water_color=%s temp_color=%s "
+            "assumed_targets=%s",
+            self.address,
+            int(settings["water_threshold_ml"]),
+            int(settings["temp_threshold_cc"]),
+            bool(settings["water_alert_enabled"]),
+            bool(settings["temp_alert_enabled"]),
+            settings["water_color_name"],
+            settings["temp_color_name"],
+            ",".join(assumed_targets) or "<none>",
+        )
         payload = encode_led_config(
             water_threshold_ml=int(settings["water_threshold_ml"]),
             temp_threshold_cc=int(settings["temp_threshold_cc"]),
