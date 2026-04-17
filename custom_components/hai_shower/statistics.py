@@ -119,12 +119,17 @@ async def async_import_usage_records(
 
     stats = existing_water.get(water_id)
     if stats:
-        last_sum_water = stats[0].get("sum", 0.0)
+        # ``get_last_statistics`` can return a row whose ``sum`` key exists but
+        # has a ``None`` value (e.g. buckets written by a non-sum writer or
+        # transiently missing). ``dict.get(key, default)`` only honors the
+        # default when the key is absent, so coerce explicitly to avoid a
+        # ``TypeError`` on the ``running_water += liters`` arithmetic below.
+        last_sum_water = float(stats[0].get("sum") or 0.0)
         last_imported_ts = _as_utc_timestamp(stats[0].get("start"))
 
     stats_count = existing_count.get(count_id)
     if stats_count:
-        last_sum_count = stats_count[0].get("sum", 0.0)
+        last_sum_count = float(stats_count[0].get("sum") or 0.0)
 
     current_hour = datetime.now(timezone.utc).replace(
         minute=0, second=0, microsecond=0
