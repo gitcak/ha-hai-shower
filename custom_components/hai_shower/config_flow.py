@@ -205,6 +205,12 @@ class HaiShowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             )
             return self.async_abort(reason="not_supported")
 
+        entries_fn = getattr(self.hass.config_entries, "async_entries", None)
+        if entries_fn is not None:
+            for entry in entries_fn(DOMAIN):
+                if str(entry.data.get(CONF_ADDRESS, "")).upper() == address:
+                    return self.async_abort(reason="already_configured")
+
         self._address = address
         self._name = discovery_info.name or DEFAULT_NAME
         _LOGGER.debug(
