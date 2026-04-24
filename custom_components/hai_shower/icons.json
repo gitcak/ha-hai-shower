@@ -38,6 +38,12 @@
       }
     },
     "sensor": {
+      "status": {
+        "default": "mdi:shower-head"
+      },
+      "last_seen": {
+        "default": "mdi:clock-check-outline"
+      },
       "shower_count": {
         "default": "mdi:counter"
       },

@@ -152,6 +152,8 @@ class HaiShowerBleClient:
             self._state.last_error = error
         if available is not None:
             self._state.available = available
+            if available:
+                self._state.last_seen_at = datetime.now(UTC)
         _LOGGER.debug(
             "Lifecycle on %s -> %s (detail=%s error=%s available=%s)",
             self.address,

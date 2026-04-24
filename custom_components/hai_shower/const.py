@@ -28,6 +28,8 @@ ENTITY_KEYS: tuple[str, ...] = (
     "temp_led_color",
     "water_alert_enabled",
     "temp_alert_enabled",
+    "status",
+    "last_seen",
     "current_temperature",
     "current_flow",
     "total_water_usage",

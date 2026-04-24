@@ -24,8 +24,10 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import CONF_ADDRESS, CONF_DEVICE_ID, DOMAIN, stable_device_identity
 from .entity import HaiShowerEntity
-from .models import HaiShowerState
+from .models import HaiLifecycleState, HaiShowerState
 from .protocol import centicelsius_to_celsius, milliliters_to_liters
+
+SHOWER_STATUS_OPTIONS = ["idle", "running", "syncing", "unreachable"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -45,6 +47,25 @@ def _flow_ml_per_sec_to_l_per_min(state: HaiShowerState) -> float | None:
     return (val * 60) / 1000
 
 
+def _shower_status(state: HaiShowerState) -> str:
+    """Return a user-facing lifecycle state for dashboards."""
+    if (
+        state.lifecycle_state is HaiLifecycleState.SYNCING
+        or state.last_history_sync_result == "running"
+    ):
+        return "syncing"
+    if state.available and (
+        state.current_temp_centicelsius is not None
+        or state.current_flow_ml_per_sec is not None
+        or state.session_duration_seconds is not None
+        or state.session_volume_milliliters is not None
+    ):
+        return "running"
+    if state.last_seen_at is not None or state.usage_records or state.last_usage_record:
+        return "idle"
+    return "unreachable"
+
+
 # ---------------------------------------------------------------------------
 # Sensor descriptions
 # ---------------------------------------------------------------------------
@@ -54,6 +75,23 @@ def _flow_ml_per_sec_to_l_per_min(state: HaiShowerState) -> float | None:
 # ---------------------------------------------------------------------------
 
 SENSORS: tuple[HaiShowerSensorDescription, ...] = (
+    # --- Derived device status ---
+    HaiShowerSensorDescription(
+        key="status",
+        translation_key="status",
+        device_class=SensorDeviceClass.ENUM,
+        options=SHOWER_STATUS_OPTIONS,
+        locally_derived=True,
+        value_fn=_shower_status,
+    ),
+    HaiShowerSensorDescription(
+        key="last_seen",
+        translation_key="last_seen",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        locally_derived=True,
+        value_fn=lambda state: state.last_seen_at,
+    ),
     # --- Live session sensors ---
     HaiShowerSensorDescription(
         key="current_temperature",

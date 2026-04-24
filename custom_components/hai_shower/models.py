@@ -116,6 +116,7 @@ class HaiShowerState:
     firmware_version: str | None = None
     product_id: str | None = None
     active_session_id: int | None = None
+    last_seen_at: datetime | None = None
     shower_count: int | None = None
     total_water_usage_ml: int = 0
     last_session_duration_seconds: int | None = None

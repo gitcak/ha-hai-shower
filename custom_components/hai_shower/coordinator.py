@@ -25,7 +25,12 @@ from .const import (
     stable_device_identity,
     usage_storage_key,
 )
-from .models import HaiLifecycleState, HaiShowerState, HaiUsageRecord
+from .models import (
+    HaiLifecycleDetail,
+    HaiLifecycleState,
+    HaiShowerState,
+    HaiUsageRecord,
+)
 from .statistics import async_import_usage_records
 from .usage_store import HaiUsageRecordStore
 
@@ -96,10 +101,15 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
             detail_label = state.lifecycle_detail.value if state.lifecycle_detail else "unknown"
             error_key = f"{detail_label}:{state.last_error}"
             if error_key != self._last_logged_error:
-                _LOGGER.warning(
+                log_method = (
+                    _LOGGER.debug
+                    if self._is_expected_idle_refresh_error(state)
+                    else _LOGGER.warning
+                )
+                log_method(
                     "Hai shower %s entered %s (%s)",
                     self._address,
-                    state.lifecycle_detail.value if state.lifecycle_detail else "error",
+                    detail_label,
                     state.last_error or "unknown error",
                 )
                 self._last_logged_error = error_key
@@ -107,6 +117,17 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
             _LOGGER.info("Hai shower %s recovered and is monitoring again", self._address)
             self._last_logged_error = None
         return state
+
+    def _is_expected_idle_refresh_error(self, state: HaiShowerState) -> bool:
+        """Return True when refresh failed because a known shower is asleep."""
+        if state.lifecycle_detail is not HaiLifecycleDetail.REFRESH_BLE_ERROR:
+            return False
+        return (
+            state.last_seen_at is not None
+            or bool(state.usage_records)
+            or state.last_usage_record is not None
+            or bool(self._stored_usage_records)
+        )
 
     async def _async_subscribe_runtime_updates(self) -> None:
         """Subscribe to runtime BLE notifications that back exposed sensors.

@@ -109,11 +109,17 @@
       }
     },
     "sensor": {
+      "status": {
+        "name": "Status"
+      },
+      "last_seen": {
+        "name": "Last seen"
+      },
       "current_temperature": {
-        "name": "Water temperature"
+        "name": "Live water temperature"
       },
       "current_flow": {
-        "name": "Water flow rate"
+        "name": "Live water flow rate"
       },
       "total_water_usage": {
         "name": "Total water usage"
@@ -131,13 +137,13 @@
         "name": "Last shower avg temperature"
       },
       "session_duration": {
-        "name": "Session duration"
+        "name": "Current session duration"
       },
       "session_volume": {
-        "name": "Session volume"
+        "name": "Current session water usage"
       },
       "battery": {
-        "name": "Battery"
+        "name": "Battery voltage"
       },
       "firmware_version": {
         "name": "Firmware version"
