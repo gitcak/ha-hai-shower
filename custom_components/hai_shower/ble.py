@@ -37,6 +37,9 @@ from .protocol import (
 _LOGGER = logging.getLogger(__name__)
 
 CONNECT_TIMEOUT = 15.0
+# Brief pause before reconnect so BLE proxies (e.g. ESPHome) can finish GATT
+# teardown; immediate reconnect often yields ESP_GATTC_OPEN_EVT status=133.
+POST_DISCONNECT_RECONNECT_DELAY = 0.35
 
 
 def decode_product_id(raw: bytes | bytearray) -> str:
@@ -107,6 +110,7 @@ class HaiShowerBleClient:
         self._skip_version_reads = False
         self._shutting_down = False
         self._expected_disconnect_client: BleakClient | None = None
+        self._post_disconnect_wait_until: float = 0.0
 
     @property
     def state(self) -> HaiShowerState:
@@ -192,6 +196,12 @@ class HaiShowerBleClient:
             return self._client
         self._shutting_down = False
 
+        gap_end = self._post_disconnect_wait_until
+        if gap_end > 0:
+            wait_s = gap_end - time.monotonic()
+            if wait_s > 0:
+                await asyncio.sleep(wait_s)
+
         device = bluetooth.async_ble_device_from_address(
             self.hass, self.address, connectable=True
         )
@@ -209,6 +219,7 @@ class HaiShowerBleClient:
         except Exception:
             raise
         _LOGGER.debug("Connected to %s", self.address)
+        self._post_disconnect_wait_until = 0.0
         self._client = client
         await self._sync_rtc(client)
         return client
@@ -216,6 +227,10 @@ class HaiShowerBleClient:
     def _handle_disconnect(self, _client: BleakClient) -> None:
         """Handle disconnect callbacks from Bleak."""
         _LOGGER.debug("Disconnected from %s", self.address)
+        self._post_disconnect_wait_until = max(
+            self._post_disconnect_wait_until,
+            time.monotonic() + POST_DISCONNECT_RECONNECT_DELAY,
+        )
         self._client = None
         self._temperature_subscribed = False
         self._shower_end_subscribed = False
@@ -238,12 +253,18 @@ class HaiShowerBleClient:
 
     async def _safe_disconnect(self, client: BleakClient | None) -> None:
         """Disconnect a client while ignoring teardown errors."""
-        if client is not None and client.is_connected:
+        had_live = client is not None and client.is_connected
+        if had_live:
             self._expected_disconnect_client = client
         try:
             await _safe_disconnect(client)
         except Exception as err:
             _LOGGER.debug("Disconnect cleanup failed for %s: %s", self.address, err)
+        if had_live:
+            self._post_disconnect_wait_until = max(
+                self._post_disconnect_wait_until,
+                time.monotonic() + POST_DISCONNECT_RECONNECT_DELAY,
+            )
 
     async def _reset_connection(self) -> None:
         """Drop the current client so the next operation reconnects."""
