@@ -391,6 +391,14 @@ class HaiShowerBleClient:
                     )
                 ):
                     await self._maybe_activate_runtime_subscriptions(client)
+                # Re-push alert/LED config on every fresh connection.  The device
+                # stores this config in volatile RAM and loses it on firmware
+                # restart (e.g. after a crash).  Without this, the physical LED
+                # remains blank after recovery even though HA still shows the
+                # saved alert state.
+                if not already_connected:
+                    await self._write_alert_config()
+                    self._raise_if_disconnected(client)
                 self._transition_state(
                     HaiLifecycleState.MONITORING,
                     detail=HaiLifecycleDetail.REFRESH_COMPLETE,
