@@ -24,6 +24,7 @@ _DATA_LENGTH: dict[str, int] = {
     UUIDS["version"].characteristic: 4,
     UUIDS["water_flow"].characteristic: 4,
     UUIDS["record_count"].characteristic: 4,
+    UUIDS["rtc_sync"].characteristic: 4,
     UUIDS["session_id"].characteristic: 4,
     UUIDS["session_time"].characteristic: 4,
     UUIDS["session_volume"].characteristic: 4,
@@ -179,6 +180,12 @@ def encode_water_threshold(value_ml: int, key: list[int]) -> bytes:
     The value is UInt32LE in milliliters, then XOR-encrypted with the device key.
     """
     buf = bytearray(value_ml.to_bytes(4, "little"))
+    return bytes(_encrypt_decrypt(buf, key))
+
+
+def encode_rtc_sync(epoch: int, key: list[int]) -> bytes:
+    """Encode the RTC sync epoch for BLE write to E6221504."""
+    buf = bytearray(epoch.to_bytes(4, "little", signed=False))
     return bytes(_encrypt_decrypt(buf, key))
 
 
