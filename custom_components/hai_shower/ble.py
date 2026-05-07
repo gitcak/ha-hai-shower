@@ -794,9 +794,6 @@ class HaiShowerBleClient:
         async with self._operation_lock:
             previous_usage_records = list(self._state.usage_records)
             previous_last_usage_record = self._state.last_usage_record
-            previous_active_session_id = self._state.active_session_id
-            previous_session_duration = self._state.session_duration_seconds
-            previous_session_volume = self._state.session_volume_milliliters
             self._usage_records = []
             self._history_done.clear()
             if not (self._client and self._client.is_connected):
@@ -850,13 +847,10 @@ class HaiShowerBleClient:
                     record = parse_usage_record(bytes(data), key=self._key)
                     if record:
                         self._usage_records.append(record)
-                        self._state.active_session_id = record.session_id
-                        self._state.session_duration_seconds = (
-                            record.duration_seconds
-                        )
-                        self._state.session_volume_milliliters = (
-                            record.volume_milliliters
-                        )
+                        # Do NOT write session_duration_seconds/volume here.
+                        # These are *historical* records from the device's log;
+                        # populating live-session fields from them produces a
+                        # phantom "current session" in HA that never clears.
                         _LOGGER.debug(
                             "Usage record on %s: session=%d duration=%ds volume=%dmL payload=%s",
                             self.address,
@@ -920,9 +914,6 @@ class HaiShowerBleClient:
             else:
                 self._state.usage_records = previous_usage_records
                 self._state.last_usage_record = previous_last_usage_record
-                self._state.active_session_id = previous_active_session_id
-                self._state.session_duration_seconds = previous_session_duration
-                self._state.session_volume_milliliters = previous_session_volume
             if self._state.lifecycle_state is HaiLifecycleState.SYNCING:
                 self._transition_state(
                     HaiLifecycleState.MONITORING,

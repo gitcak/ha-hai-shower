@@ -177,7 +177,7 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
     def _process_shower_end_trigger(self, record: HaiUsageRecord | None) -> None:
         """Apply a shower-end record preview before running full sync."""
         if record is not None:
-            self._apply_shower_end_record(record)
+            self._apply_shower_end_record(record, publish_live_session=True)
             self.async_set_updated_data(self.client.state)
         self._schedule_history_sync()
 
@@ -383,16 +383,26 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
         state.shower_count = len(records)
         state.total_water_usage_ml = sum(r.volume_milliliters for r in records)
 
-    def _apply_shower_end_record(self, record: HaiUsageRecord) -> None:
-        """Apply a single completed-session record to summary state."""
+    def _apply_shower_end_record(
+        self, record: HaiUsageRecord, *, publish_live_session: bool = False
+    ) -> None:
+        """Apply a single completed-session record to summary state.
+
+        Live-session fields (session_duration_seconds, session_volume_milliliters,
+        active_session_id) are only written when publish_live_session is True —
+        i.e. on a real shower-end BLE notify. Restoring or syncing historical
+        records must not stuff stale values into the live-session sensors, or
+        HA will show a phantom "current session" that never clears.
+        """
         state = self.client.state
         state.last_usage_record = record
-        state.active_session_id = record.session_id
-        state.session_duration_seconds = record.duration_seconds
-        state.session_volume_milliliters = record.volume_milliliters
         state.last_session_duration_seconds = record.duration_seconds
         state.last_session_volume_ml = record.volume_milliliters
         state.last_session_avg_temp_cc = record.average_temp_centicelsius
+        if publish_live_session:
+            state.active_session_id = record.session_id
+            state.session_duration_seconds = record.duration_seconds
+            state.session_volume_milliliters = record.volume_milliliters
 
     def _merge_usage_records(
         self,
