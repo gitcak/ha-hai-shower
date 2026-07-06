@@ -48,7 +48,17 @@ def _flow_ml_per_sec_to_l_per_min(state: HaiShowerState) -> float | None:
 
 
 def _shower_status(state: HaiShowerState) -> str:
-    """Return a user-facing lifecycle state for dashboards."""
+    """Return a user-facing lifecycle state for dashboards.
+
+    Only ``current_temp_centicelsius``/``current_flow_ml_per_sec`` are live,
+    self-clearing signals (reset to ``None`` at the top of every BLE poll in
+    ``ble.py``, see ``_read_temperature``/``_read_flow_rate``). Do NOT use
+    ``session_duration_seconds``/``session_volume_milliliters`` here: those
+    are latched by the shower-end notify handler once a session *completes*
+    and are never cleared afterwards, so treating their mere presence as
+    "running" made status stick on "running" forever after the first shower
+    (see gitcak/ha-hai-shower#1).
+    """
     if (
         state.lifecycle_state is HaiLifecycleState.SYNCING
         or state.last_history_sync_result == "running"
@@ -57,8 +67,6 @@ def _shower_status(state: HaiShowerState) -> str:
     if state.available and (
         state.current_temp_centicelsius is not None
         or state.current_flow_ml_per_sec is not None
-        or state.session_duration_seconds is not None
-        or state.session_volume_milliliters is not None
     ):
         return "running"
     if state.last_seen_at is not None or state.usage_records or state.last_usage_record:

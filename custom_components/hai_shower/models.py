@@ -48,6 +48,7 @@ class HaiLifecycleDetail(StrEnum):
     SHOWER_END_SUBSCRIPTION_ACTIVE = "shower_end_subscription_active"
     SHOWER_END_TRIGGER = "shower_end_trigger"
     SUBSCRIBE_SHOWER_END_BLE_ERROR = "subscribe_shower_end_ble_error"
+    RUNTIME_SUBSCRIPTION_IDLE_TIMEOUT = "runtime_subscription_idle_timeout"
 
     # --- History sync ---
     HISTORY_SYNC_CONNECTING = "history_sync_connecting"

@@ -36,6 +36,7 @@ from .usage_store import HaiUsageRecordStore, HaiUsageSnapshot
 
 _LOGGER = logging.getLogger(__name__)
 POST_HISTORY_SYNC_REFRESH_COOLDOWN_SECONDS = 20.0
+LAST_SEEN_PERSIST_INTERVAL_SECONDS = 300.0
 
 
 class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
@@ -63,6 +64,7 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
         self._lifetime_total_water_ml = 0
         self._lifetime_shower_count = 0
         self._lifetime_last_session_id: int | None = None
+        self._persisted_last_seen_at: datetime | None = None
         self._last_logged_error: str | None = None
         self._history_sync_task: asyncio.Task[None] | None = None
         self._suspend_refresh_until: float = 0.0
@@ -86,6 +88,7 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
         if self._history_sync_task is not None:
             self._history_sync_task.cancel()
             self._history_sync_task = None
+        await self._async_maybe_persist_last_seen(force=True)
         await self.client.async_shutdown()
 
     async def _async_update_data(self) -> HaiShowerState:
@@ -119,6 +122,7 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
         elif self._last_logged_error is not None:
             _LOGGER.info("Hai shower %s recovered and is monitoring again", self._address)
             self._last_logged_error = None
+        await self._async_maybe_persist_last_seen()
         return state
 
     def _is_expected_idle_refresh_error(self, state: HaiShowerState) -> bool:
@@ -310,6 +314,9 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
         self._lifetime_total_water_ml = snapshot.lifetime_total_water_ml
         self._lifetime_shower_count = snapshot.lifetime_shower_count
         self._lifetime_last_session_id = snapshot.lifetime_last_session_id
+        if snapshot.last_seen_at is not None:
+            self.client.state.last_seen_at = snapshot.last_seen_at
+            self._persisted_last_seen_at = snapshot.last_seen_at
         if self._stored_usage_records:
             _LOGGER.debug(
                 "Restored %d usage records for %s",
@@ -491,6 +498,26 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
             lifetime_total_water_ml=self._lifetime_total_water_ml,
             lifetime_shower_count=self._lifetime_shower_count,
             lifetime_last_session_id=self._lifetime_last_session_id,
+            last_seen_at=self.client.state.last_seen_at,
+        )
+
+    async def _async_maybe_persist_last_seen(self, *, force: bool = False) -> None:
+        """Persist the latest BLE contact timestamp without writing every poll."""
+        current = self.client.state.last_seen_at
+        if current is None:
+            return
+        persisted = self._persisted_last_seen_at
+        if not force:
+            if persisted is not None and (
+                current - persisted
+            ).total_seconds() < LAST_SEEN_PERSIST_INTERVAL_SECONDS:
+                return
+        elif persisted is not None and current <= persisted:
+            return
+        self._persisted_last_seen_at = current
+        await self._usage_store.async_save_snapshot(
+            self._usage_storage_key,
+            self._usage_snapshot(),
         )
 
     def _usage_record_key(self, record: HaiUsageRecord) -> int:

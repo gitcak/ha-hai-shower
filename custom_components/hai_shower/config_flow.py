@@ -61,12 +61,24 @@ class HaiShowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return await self.async_step_reauth_confirm()
 
     async def async_step_reconfigure(
-        self, entry_data: dict[str, Any]
+        self, user_input: dict[str, Any] | None = None
     ) -> FlowResult:
-        """Handle a request to correct the BLE address for an existing entry."""
-        self._address = str(entry_data.get(CONF_ADDRESS, "")).upper()
-        self._device_id = str(entry_data.get(CONF_DEVICE_ID, ""))
-        self._name = entry_data.get(CONF_NAME) or DEFAULT_NAME
+        """Handle a request to correct the BLE address for an existing entry.
+
+        Unlike ``async_step_reauth`` (which the HA core framework invokes
+        with the entry's ``data`` dict as its argument), ``async_step_reconfigure``
+        is invoked like any other flow step: the initial call from the
+        frontend passes ``user_input=None``. Reading entry data from that
+        argument crashes with ``AttributeError: 'NoneType' object has no
+        attribute 'get'`` the moment a user clicks "Reconfigure" in the UI
+        (live-confirmed 2026-07-06 via HA error log). Use
+        ``self._get_reconfigure_entry()`` instead, per the documented
+        reconfigure-flow API.
+        """
+        entry = self._get_reconfigure_entry()
+        self._address = str(entry.data.get(CONF_ADDRESS, "")).upper()
+        self._device_id = str(entry.data.get(CONF_DEVICE_ID, ""))
+        self._name = entry.data.get(CONF_NAME) or DEFAULT_NAME
         return await self.async_step_reconfigure_confirm()
 
     async def async_step_reconfigure_confirm(

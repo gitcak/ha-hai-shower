@@ -41,6 +41,39 @@ CONNECT_TIMEOUT = 15.0
 # Brief pause before reconnect so BLE proxies (e.g. ESPHome) can finish GATT
 # teardown; immediate reconnect often yields ESP_GATTC_OPEN_EVT status=133.
 POST_DISCONNECT_RECONNECT_DELAY = 0.35
+# Runtime notify subscriptions are normally torn down by the shower-end BLE
+# notify handler once a session completes. If that notify is ever dropped or
+# never fires, nothing else clears them, so the connection is held open
+# indefinitely (gitcak/ha-hai-shower#1: shower LED stayed on and Bluetooth
+# kept reconnecting for over an hour after water had stopped). This many
+# consecutive polls (~60s at the 30s coordinator interval) of confirmed idle
+# telemetry while still subscribed is treated as an inferred shower end.
+IDLE_POLLS_BEFORE_INFERRED_SHOWER_END = 2
+# GATT operations on some backends (notably BlueZ/D-Bus, which many ESPHome
+# Bluetooth proxy paths ultimately route through) provide no timeout of their
+# own: if the proxy or adapter silently drops the underlying transport
+# without ever firing Bleak's `disconnected_callback`, a subsequent
+# read_gatt_char/write_gatt_char/start_notify/stop_notify/disconnect call can
+# hang the awaiting task forever (confirmed upstream — hbldh/bleak#691: "There
+# is no timeout capability in the dbus-next library that Bleak uses"; #490
+# reports the same dead-end). Every GATT/connection-teardown call in this
+# module is bounded by this timeout so a wedged transport surfaces as a
+# BleakError (recoverable via the existing reconnect/error-state paths)
+# instead of hanging `_operation_lock` — and therefore the entire
+# integration's refresh/subscribe/write/history-sync operations — forever.
+GATT_OPERATION_TIMEOUT_SECONDS = 10.0
+
+
+async def _await_gatt_operation(awaitable, *, timeout: float, operation: str):
+    """Bound a Bleak GATT/connection coroutine so a silent hang becomes a BleakError."""
+    try:
+        return await asyncio.wait_for(awaitable, timeout=timeout)
+    except TimeoutError as err:
+        raise BleakError(
+            f"{operation} timed out after {timeout}s with no response "
+            "(adapter or Bluetooth proxy likely dropped the connection "
+            "silently)"
+        ) from err
 
 
 def decode_product_id(raw: bytes | bytearray) -> str:
@@ -69,7 +102,11 @@ async def async_read_product_id(
         return None
 
     try:
-        raw = await client.read_gatt_char(UUIDS["product_id"].characteristic)
+        raw = await _await_gatt_operation(
+            client.read_gatt_char(UUIDS["product_id"].characteristic),
+            timeout=GATT_OPERATION_TIMEOUT_SECONDS,
+            operation="read_gatt_char",
+        )
     except BleakError:
         return None
     finally:
@@ -85,7 +122,11 @@ async def _safe_disconnect(client: BleakClient | None) -> None:
     if client is None or not client.is_connected:
         return
     try:
-        await client.disconnect()
+        await _await_gatt_operation(
+            client.disconnect(),
+            timeout=GATT_OPERATION_TIMEOUT_SECONDS,
+            operation="disconnect",
+        )
     except Exception:
         return
 
@@ -113,6 +154,11 @@ class HaiShowerBleClient:
         self._expected_disconnect_client: BleakClient | None = None
         self._post_disconnect_wait_until: float = 0.0
         self._pending_alert_config_write = False
+        self._idle_polls_while_subscribed = 0
+        # Overridable per-instance so tests can exercise the timeout path
+        # without a real multi-second wait; production always uses the
+        # module default.
+        self._gatt_timeout_s = GATT_OPERATION_TIMEOUT_SECONDS
 
     @property
     def state(self) -> HaiShowerState:
@@ -290,30 +336,81 @@ class HaiShowerBleClient:
         first post-shower poll.
         """
         async with self._operation_lock:
-            client = self._client
-            if client and client.is_connected:
-                try:
-                    if self._temperature_subscribed:
-                        await client.stop_notify(UUIDS["water_temp"].characteristic)
-                except Exception as err:
-                    _LOGGER.debug(
-                        "Failed to stop temperature notifications on %s: %s",
-                        self.address,
-                        err,
-                    )
-                try:
-                    if self._shower_end_subscribed:
-                        await client.stop_notify(UUIDS["shower_end"].characteristic)
-                except Exception as err:
-                    _LOGGER.debug(
-                        "Failed to stop shower-end notifications on %s: %s",
-                        self.address,
-                        err,
-                    )
-            self._temperature_subscribed = False
-            self._shower_end_subscribed = False
-            await self._safe_disconnect(client)
-            self._client = None
+            await self._reset_runtime_monitoring_locked()
+
+    async def _reset_runtime_monitoring_locked(self) -> None:
+        """Stop notify subscriptions and disconnect.
+
+        Caller must already hold ``_operation_lock`` (``asyncio.Lock`` is not
+        reentrant, so this must not acquire it itself). Shared by
+        ``async_reset_runtime_monitoring`` and the idle-timeout safety net in
+        ``async_refresh``.
+        """
+        client = self._client
+        if client and client.is_connected:
+            try:
+                if self._temperature_subscribed:
+                    await self._notify_stop(client, UUIDS["water_temp"].characteristic)
+            except Exception as err:
+                _LOGGER.debug(
+                    "Failed to stop temperature notifications on %s: %s",
+                    self.address,
+                    err,
+                )
+            try:
+                if self._shower_end_subscribed:
+                    await self._notify_stop(client, UUIDS["shower_end"].characteristic)
+            except Exception as err:
+                _LOGGER.debug(
+                    "Failed to stop shower-end notifications on %s: %s",
+                    self.address,
+                    err,
+                )
+        self._temperature_subscribed = False
+        self._shower_end_subscribed = False
+        await self._safe_disconnect(client)
+        self._client = None
+
+    async def _read_char(self, client: BleakClient, characteristic: str) -> bytes:
+        """Read a characteristic, bounded by ``GATT_OPERATION_TIMEOUT_SECONDS``."""
+        return await _await_gatt_operation(
+            client.read_gatt_char(characteristic),
+            timeout=self._gatt_timeout_s,
+            operation="read_gatt_char",
+        )
+
+    async def _write_char(
+        self,
+        client: BleakClient,
+        characteristic: str,
+        payload: bytes,
+        *,
+        response: bool = True,
+    ) -> None:
+        """Write a characteristic, bounded by ``GATT_OPERATION_TIMEOUT_SECONDS``."""
+        await _await_gatt_operation(
+            client.write_gatt_char(characteristic, payload, response=response),
+            timeout=self._gatt_timeout_s,
+            operation="write_gatt_char",
+        )
+
+    async def _notify_start(
+        self, client: BleakClient, characteristic: str, callback
+    ) -> None:
+        """Start a notify subscription, bounded by ``GATT_OPERATION_TIMEOUT_SECONDS``."""
+        await _await_gatt_operation(
+            client.start_notify(characteristic, callback),
+            timeout=self._gatt_timeout_s,
+            operation="start_notify",
+        )
+
+    async def _notify_stop(self, client: BleakClient, characteristic: str) -> None:
+        """Stop a notify subscription, bounded by ``GATT_OPERATION_TIMEOUT_SECONDS``."""
+        await _await_gatt_operation(
+            client.stop_notify(characteristic),
+            timeout=self._gatt_timeout_s,
+            operation="stop_notify",
+        )
 
     async def _sync_rtc(self, client: BleakClient) -> None:
         """Write the current UTC epoch to the shower's RTC sync characteristic.
@@ -326,7 +423,7 @@ class HaiShowerBleClient:
         epoch = int(time.time())
         payload = encode_rtc_sync(epoch, self._key)
         try:
-            await client.write_gatt_char(char.characteristic, payload, response=True)
+            await self._write_char(client, char.characteristic, payload, response=True)
             _LOGGER.debug(
                 "RTC synced on %s to epoch %d (payload=%s)",
                 self.address,
@@ -399,6 +496,40 @@ class HaiShowerBleClient:
                     )
                 ):
                     await self._maybe_activate_runtime_subscriptions(client)
+                subscribed = self._temperature_subscribed or self._shower_end_subscribed
+                currently_idle = (
+                    self._state.current_temp_centicelsius is None
+                    and self._state.current_flow_ml_per_sec is None
+                )
+                if subscribed and currently_idle:
+                    self._idle_polls_while_subscribed += 1
+                else:
+                    self._idle_polls_while_subscribed = 0
+                if self._idle_polls_while_subscribed >= IDLE_POLLS_BEFORE_INFERRED_SHOWER_END:
+                    # The shower-end notify never arrived (dropped/missed) even
+                    # though telemetry has read idle for multiple consecutive
+                    # polls. Treat this as an inferred shower end so the
+                    # connection doesn't hang open forever waiting for a
+                    # notify that may never come. The actual usage record (if
+                    # any) is still recovered by the next history sync, which
+                    # downloads the device's full record log, not just deltas.
+                    self._idle_polls_while_subscribed = 0
+                    _LOGGER.warning(
+                        "Inferred shower end on %s: telemetry idle for %d "
+                        "consecutive polls with notify subscriptions still "
+                        "active and no shower_end notify received; resetting "
+                        "runtime monitoring",
+                        self.address,
+                        IDLE_POLLS_BEFORE_INFERRED_SHOWER_END,
+                    )
+                    self._transition_state(
+                        HaiLifecycleState.MONITORING,
+                        detail=HaiLifecycleDetail.RUNTIME_SUBSCRIPTION_IDLE_TIMEOUT,
+                        available=True,
+                    )
+                    await self._reset_runtime_monitoring_locked()
+                    if self._shower_end_callback:
+                        self._shower_end_callback(None)
                 # Re-push alert/LED config on every fresh idle connection.  The
                 # device stores this config in volatile RAM and loses it on
                 # firmware restart, but runtime evidence shows led_config writes
@@ -412,8 +543,8 @@ class HaiShowerBleClient:
                             "Alert config sync deferred on %s during refresh",
                             self.address,
                         )
-                    else:
-                        self._raise_if_disconnected(client)
+                    elif self._client is not None:
+                        self._raise_if_disconnected(self._client)
                 self._transition_state(
                     HaiLifecycleState.MONITORING,
                     detail=HaiLifecycleDetail.REFRESH_COMPLETE,
@@ -425,8 +556,10 @@ class HaiShowerBleClient:
                 # spurious disconnect_callback and briefly marks entities
                 # unavailable.  When subscriptions are active (shower running)
                 # the connection is intentionally kept alive for notifications.
+                # Use self._client (not the possibly-stale local `client`) since
+                # the idle-timeout safety net above may have already reset it.
                 if not (self._temperature_subscribed or self._shower_end_subscribed):
-                    await self._safe_disconnect(client)
+                    await self._safe_disconnect(self._client)
                     self._client = None
             except BleakError as err:
                 _LOGGER.debug("BLE read failed for %s: %s", self.address, err)
@@ -450,7 +583,7 @@ class HaiShowerBleClient:
         """Read battery level as a plaintext UInt16LE millivolt value."""
         char = UUIDS["battery_level"]
         try:
-            raw = await client.read_gatt_char(char.characteristic)
+            raw = await self._read_char(client, char.characteristic)
             if raw and len(raw) >= 2:
                 level_mv = int.from_bytes(raw[:2], "little")
                 self._state.battery_level_mv = level_mv
@@ -468,7 +601,7 @@ class HaiShowerBleClient:
         char = UUIDS["water_temp"]
         self._state.current_temp_centicelsius = None
         try:
-            raw = await client.read_gatt_char(char.characteristic)
+            raw = await self._read_char(client, char.characteristic)
             debug = decrypt_characteristic_debug(char.characteristic, raw, self._key)
             value = debug["value"]
             if value is not None:
@@ -503,7 +636,7 @@ class HaiShowerBleClient:
         char = UUIDS["water_flow"]
         self._state.current_flow_ml_per_sec = None
         try:
-            raw = await client.read_gatt_char(char.characteristic)
+            raw = await self._read_char(client, char.characteristic)
             debug = decrypt_characteristic_debug(char.characteristic, raw, self._key)
             value = debug["value"]
             if value is not None:
@@ -537,7 +670,7 @@ class HaiShowerBleClient:
         """Read and decrypt firmware version."""
         char = UUIDS["version"]
         try:
-            raw = await client.read_gatt_char(char.characteristic)
+            raw = await self._read_char(client, char.characteristic)
             debug = decrypt_characteristic_debug(char.characteristic, raw, self._key)
             value = debug["value"]
             if value is not None:
@@ -570,7 +703,7 @@ class HaiShowerBleClient:
         """Read the plaintext product identifier."""
         char = UUIDS["product_id"]
         try:
-            raw = await client.read_gatt_char(char.characteristic)
+            raw = await self._read_char(client, char.characteristic)
             if raw:
                 product_id = self._decode_product_id(raw)
                 self._state.product_id = product_id
@@ -706,7 +839,7 @@ class HaiShowerBleClient:
                 if self._temperature_callback:
                     self._temperature_callback(value)
 
-        await client.start_notify(char.characteristic, _on_notify)
+        await self._notify_start(client, char.characteristic, _on_notify)
         self._temperature_subscribed = True
 
     async def _maybe_activate_runtime_subscriptions(self, client: BleakClient) -> None:
@@ -785,7 +918,7 @@ class HaiShowerBleClient:
             if self._shower_end_callback:
                 self._shower_end_callback(record)
 
-        await client.start_notify(char.characteristic, _on_notify)
+        await self._notify_start(client, char.characteristic, _on_notify)
         self._shower_end_subscribed = True
 
     async def async_trigger_history_sync(self) -> list[HaiUsageRecord]:
@@ -864,9 +997,9 @@ class HaiShowerBleClient:
                     _LOGGER.warning("Bad usage record: %s", err)
 
             try:
-                await client.start_notify(usage.characteristic, _on_record)
-                await client.write_gatt_char(
-                    trigger.characteristic, b"\x00", response=True
+                await self._notify_start(client, usage.characteristic, _on_record)
+                await self._write_char(
+                    client, trigger.characteristic, b"\x00", response=True
                 )
                 _LOGGER.debug("History sync triggered on %s", self.address)
                 await asyncio.wait_for(self._history_done.wait(), timeout=30.0)
@@ -899,7 +1032,7 @@ class HaiShowerBleClient:
             finally:
                 try:
                     if client and client.is_connected:
-                        await client.stop_notify(usage.characteristic)
+                        await self._notify_stop(client, usage.characteristic)
                 except Exception as err:
                     _LOGGER.debug(
                         "Failed to stop history notifications on %s: %s",
@@ -976,7 +1109,7 @@ class HaiShowerBleClient:
     ) -> None:
         """Write a characteristic through the managed BLE connection."""
         client = await self._ensure_connected()
-        await client.write_gatt_char(characteristic, payload, response=True)
+        await self._write_char(client, characteristic, payload, response=True)
         _LOGGER.debug(
             "Wrote %s on %s: payload=%s",
             log_label,

@@ -25,6 +25,7 @@ class HaiUsageSnapshot:
     lifetime_total_water_ml: int
     lifetime_shower_count: int
     lifetime_last_session_id: int | None
+    last_seen_at: datetime | None = None
 
     @classmethod
     def from_records(cls, records: list[HaiUsageRecord]) -> "HaiUsageSnapshot":
@@ -36,6 +37,7 @@ class HaiUsageSnapshot:
             lifetime_total_water_ml=sum(record.volume_milliliters for record in records),
             lifetime_shower_count=len(records),
             lifetime_last_session_id=max(record.session_id for record in records),
+            last_seen_at=None,
         )
 
 
@@ -160,11 +162,14 @@ def _snapshot_from_storage_value(
     ):
         lifetime_last_session_id = derived.lifetime_last_session_id
 
+    last_seen_at = _optional_utc_datetime(value.get("last_seen_at"))
+
     snapshot = HaiUsageSnapshot(
         records=records,
         lifetime_total_water_ml=lifetime_total_water_ml,
         lifetime_shower_count=lifetime_shower_count,
         lifetime_last_session_id=lifetime_last_session_id,
+        last_seen_at=last_seen_at,
     )
     return snapshot, _snapshot_to_dict(snapshot) != value
 
@@ -188,12 +193,27 @@ def _records_from_list(raw_records: list[object], storage_key: str) -> list[HaiU
 
 def _snapshot_to_dict(snapshot: HaiUsageSnapshot) -> dict[str, Any]:
     """Serialize a usage snapshot for storage."""
-    return {
+    payload: dict[str, Any] = {
         "records": [_record_to_dict(record) for record in snapshot.records],
         "lifetime_total_water_ml": snapshot.lifetime_total_water_ml,
         "lifetime_shower_count": snapshot.lifetime_shower_count,
         "lifetime_last_session_id": snapshot.lifetime_last_session_id,
     }
+    if snapshot.last_seen_at is not None:
+        payload["last_seen_at"] = snapshot.last_seen_at.isoformat()
+    return payload
+
+
+def _optional_utc_datetime(value: object) -> datetime | None:
+    """Parse an optional ISO 8601 datetime string from storage."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return _parse_utc_datetime(value)
+    except ValueError:
+        return None
 
 
 def _nonnegative_int(value: object, default: int) -> int:
