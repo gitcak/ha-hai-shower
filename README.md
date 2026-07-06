@@ -128,8 +128,11 @@ updates the session sensors, and imports the data into Home Assistant's
 long-term statistics. Usage records are stored locally so your dashboard data
 survives HA restarts.
 
-The **Total water usage** sensor works with HA's Energy dashboard under the
-Water tab.
+The **Total water usage** sensor works with Home Assistant's Energy dashboard
+under the Water tab. In Home Assistant 2026.6+, add it as an individual water
+device for the shower. If you also track a whole-home water meter, configure
+that meter as the upstream device so shower usage appears as a child source and
+is not double-counted.
 
 ---
 

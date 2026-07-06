@@ -35,8 +35,6 @@ class HaiShowerEntity(CoordinatorEntity[HaiShowerCoordinator]):
     def extra_state_attributes(self) -> dict[str, str | int]:
         """Expose shared diagnostic attributes across Hai entities."""
         attributes: dict[str, str | int] = {}
-        if self.coordinator.data.product_id:
-            attributes["product_id"] = self.coordinator.data.product_id
         if self.coordinator.data.active_session_id is not None:
             attributes["active_session_id"] = self.coordinator.data.active_session_id
         return attributes

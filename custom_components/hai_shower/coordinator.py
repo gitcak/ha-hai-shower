@@ -32,7 +32,7 @@ from .models import (
     HaiUsageRecord,
 )
 from .statistics import async_import_usage_records
-from .usage_store import HaiUsageRecordStore
+from .usage_store import HaiUsageRecordStore, HaiUsageSnapshot
 
 _LOGGER = logging.getLogger(__name__)
 POST_HISTORY_SYNC_REFRESH_COOLDOWN_SECONDS = 20.0
@@ -60,6 +60,9 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
         self._apply_persisted_alert_settings(getattr(entry, "options", {}))
         self._usage_store = HaiUsageRecordStore(hass)
         self._stored_usage_records: list[HaiUsageRecord] = []
+        self._lifetime_total_water_ml = 0
+        self._lifetime_shower_count = 0
+        self._lifetime_last_session_id: int | None = None
         self._last_logged_error: str | None = None
         self._history_sync_task: asyncio.Task[None] | None = None
         self._suspend_refresh_until: float = 0.0
@@ -213,14 +216,13 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
         try:
             synced_records = await self.client.async_trigger_history_sync()
             if synced_records:
-                newly_synced_records = self._new_usage_records(
-                    existing_records, synced_records
-                )
+                newly_synced_records = self._new_lifetime_usage_records(synced_records)
                 self._stored_usage_records = self._merge_usage_records(
                     existing_records, synced_records
                 )
-                await self._usage_store.async_save(
-                    self._usage_storage_key, self._stored_usage_records
+                self._advance_lifetime_totals(newly_synced_records)
+                await self._usage_store.async_save_snapshot(
+                    self._usage_storage_key, self._usage_snapshot()
                 )
                 if trigger == "automatic" and newly_synced_records:
                     latest_record = max(
@@ -300,10 +302,14 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
 
     async def _async_restore_usage_records(self) -> None:
         """Restore persisted usage records into runtime state."""
-        self._stored_usage_records = await self._usage_store.async_load(
+        snapshot = await self._usage_store.async_load_snapshot(
             self._usage_storage_key,
             legacy_keys=(self._address,),
         )
+        self._stored_usage_records = snapshot.records
+        self._lifetime_total_water_ml = snapshot.lifetime_total_water_ml
+        self._lifetime_shower_count = snapshot.lifetime_shower_count
+        self._lifetime_last_session_id = snapshot.lifetime_last_session_id
         if self._stored_usage_records:
             _LOGGER.debug(
                 "Restored %d usage records for %s",
@@ -374,14 +380,18 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
         """Apply a merged usage-record view to coordinator state."""
         state = self.client.state
         state.usage_records = list(records)
-        if not records:
+        if records:
+            latest = records[-1]
+            self._apply_shower_end_record(latest)
+        else:
             state.last_usage_record = None
-            return
-        latest = records[-1]
-        self._apply_shower_end_record(latest)
-        # Cumulative fields for dashboard sensors
-        state.shower_count = len(records)
-        state.total_water_usage_ml = sum(r.volume_milliliters for r in records)
+        # Energy-facing cumulative fields use lifetime counters, not the capped
+        # recent-record cache.
+        state.shower_count = max(self._lifetime_shower_count, len(records))
+        state.total_water_usage_ml = max(
+            self._lifetime_total_water_ml,
+            sum(record.volume_milliliters for record in records),
+        )
 
     def _apply_shower_end_record(
         self, record: HaiUsageRecord, *, publish_live_session: bool = False
@@ -446,6 +456,42 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
             seen_new_keys.add(key)
             new_records.append(record)
         return new_records
+
+    def _new_lifetime_usage_records(
+        self, incoming: list[HaiUsageRecord]
+    ) -> list[HaiUsageRecord]:
+        """Return records newer than the persisted lifetime high-water mark."""
+        last_session_id = self._lifetime_last_session_id
+        new_records: list[HaiUsageRecord] = []
+        seen_new_keys: set[int] = set()
+        for record in sorted(incoming, key=self._usage_record_key):
+            key = self._usage_record_key(record)
+            if last_session_id is not None and key <= last_session_id:
+                continue
+            if key in seen_new_keys:
+                continue
+            seen_new_keys.add(key)
+            new_records.append(record)
+        return new_records
+
+    def _advance_lifetime_totals(self, records: list[HaiUsageRecord]) -> None:
+        """Advance lifetime counters with records not previously counted."""
+        if not records:
+            return
+        self._lifetime_total_water_ml += sum(
+            record.volume_milliliters for record in records
+        )
+        self._lifetime_shower_count += len(records)
+        self._lifetime_last_session_id = max(record.session_id for record in records)
+
+    def _usage_snapshot(self) -> HaiUsageSnapshot:
+        """Return the current persisted usage snapshot."""
+        return HaiUsageSnapshot(
+            records=list(self._stored_usage_records),
+            lifetime_total_water_ml=self._lifetime_total_water_ml,
+            lifetime_shower_count=self._lifetime_shower_count,
+            lifetime_last_session_id=self._lifetime_last_session_id,
+        )
 
     def _usage_record_key(self, record: HaiUsageRecord) -> int:
         """Stable dedupe key for a usage record — session_id is authoritative."""

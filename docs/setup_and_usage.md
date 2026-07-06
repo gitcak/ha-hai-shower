@@ -158,6 +158,10 @@ For release/version alignment details, see `docs/release_process.md`.
 - Usage records are stored locally so cumulative/last-session sensors survive
   Home Assistant restarts
 - Long-term statistics are imported for water usage and shower count
+- In Home Assistant 2026.6+, add **Total water usage** as an Energy dashboard
+  individual water device for the shower. If a whole-home water meter is also
+  configured, set that meter as the upstream device so shower usage is shown as
+  a child source instead of being double-counted.
 
 ## Current Limitations
 

@@ -28,6 +28,7 @@ from homeassistant.components.recorder.models import (
     StatisticData,
     StatisticMetaData,
 )
+from homeassistant.const import UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.util.unit_conversion import VolumeConverter
 
@@ -198,7 +199,7 @@ async def async_import_usage_records(
     water_meta = StatisticMetaData(
         source=DOMAIN,
         statistic_id=water_id,
-        unit_of_measurement="L",
+        unit_of_measurement=UnitOfVolume.LITERS,
         unit_class=_VOLUME_UNIT_CLASS,
         has_sum=True,
         has_mean=False,

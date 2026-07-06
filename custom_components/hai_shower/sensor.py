@@ -261,8 +261,5 @@ class HaiShowerSensor(HaiShowerEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, object]:
-        """Expose shared diagnostic attributes and recent sessions."""
-        attrs = super().extra_state_attributes
-        if self.entity_description.key == "shower_count":
-            attrs["recent_sessions"] = self.coordinator.recent_sessions()
-        return attrs
+        """Expose shared diagnostic attributes."""
+        return super().extra_state_attributes

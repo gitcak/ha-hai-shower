@@ -49,7 +49,6 @@ async def async_get_config_entry_diagnostics(
         "lifecycle_detail": state.lifecycle_detail,
         "last_error": state.last_error,
         "last_seen_at": state.last_seen_at.isoformat() if state.last_seen_at else None,
-        "product_id": state.product_id,
         "battery_level_mv": state.battery_level_mv,
         "firmware_version": state.firmware_version,
         "current_temp_centicelsius": state.current_temp_centicelsius,

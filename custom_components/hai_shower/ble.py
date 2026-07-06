@@ -15,7 +15,7 @@ from bleak_retry_connector import establish_connection
 from homeassistant.components import bluetooth
 from homeassistant.core import HomeAssistant
 
-from .const import UUIDS, payload_preview
+from .const import UUIDS, payload_preview, short_id
 from .models import (
     VALID_TRANSITIONS,
     HaiLifecycleDetail,
@@ -575,10 +575,9 @@ class HaiShowerBleClient:
                 product_id = self._decode_product_id(raw)
                 self._state.product_id = product_id
                 _LOGGER.debug(
-                    "Product ID read on %s: %s (payload=%s)",
+                    "Product ID read on %s: %s",
                     self.address,
-                    product_id,
-                    payload_preview(raw),
+                    short_id(product_id),
                 )
         except BleakError as err:
             _LOGGER.debug("Product ID read failed: %s", err)
