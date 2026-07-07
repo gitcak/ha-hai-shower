@@ -85,6 +85,7 @@ async def async_import_usage_records(
     records: list[HaiUsageRecord],
     *,
     statistic_identity: str | None = None,
+    ignore_last_imported: bool = False,
 ) -> None:
     """Import usage records as external statistics for the Water dashboard.
 
@@ -132,6 +133,14 @@ async def async_import_usage_records(
     if stats_count:
         last_sum_count = float(stats_count[0].get("sum") or 0.0)
 
+    if ignore_last_imported:
+        # Repair backfill rebuilds closed-hour buckets from the full passed
+        # record set. Seeding from recorder sums would double-count sessions
+        # whose volumes were already imported under mis-decoded timestamps.
+        last_sum_water = 0.0
+        last_sum_count = 0.0
+        last_imported_ts = 0.0
+
     current_hour = datetime.now(timezone.utc).replace(
         minute=0, second=0, microsecond=0
     )
@@ -145,7 +154,7 @@ async def async_import_usage_records(
         )
         if hour >= current_hour:
             continue
-        if hour.timestamp() <= last_imported_ts:
+        if not ignore_last_imported and hour.timestamp() <= last_imported_ts:
             continue
         new_records.append(record)
 

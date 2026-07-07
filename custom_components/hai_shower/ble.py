@@ -33,6 +33,7 @@ from .protocol import (
     encode_temp_threshold,
     encode_water_threshold,
     parse_usage_record,
+    usage_record_start_time_debug,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -163,6 +164,10 @@ class HaiShowerBleClient:
     @property
     def state(self) -> HaiShowerState:
         return self._state
+
+    @property
+    def device_key(self) -> list[int]:
+        return self._key
 
     @property
     def is_connected(self) -> bool:
@@ -915,6 +920,14 @@ class HaiShowerBleClient:
                 len(payload),
                 payload_preview(payload),
             )
+            # Full payload + plaintext vs XOR-decrypted timestamp debug lines.
+            # Hermes confirms full 18-byte decrypt; see usage_record_re_markers.md.
+            _LOGGER.debug(
+                "Shower-end record on %s: full_payload=%s %s",
+                self.address,
+                payload.hex(),
+                usage_record_start_time_debug(payload, self._key),
+            )
             if self._shower_end_callback:
                 self._shower_end_callback(record)
 
@@ -984,12 +997,15 @@ class HaiShowerBleClient:
                         # populating live-session fields from them produces a
                         # phantom "current session" in HA that never clears.
                         _LOGGER.debug(
-                            "Usage record on %s: session=%d duration=%ds volume=%dmL payload=%s",
+                            "Usage record on %s: session=%d duration=%ds "
+                            "volume=%dmL start=%s full_payload=%s %s",
                             self.address,
                             record.session_id,
                             record.duration_seconds,
                             record.volume_milliliters,
-                            payload_preview(data),
+                            record.start_time.isoformat(),
+                            bytes(data).hex(),
+                            usage_record_start_time_debug(bytes(data), self._key),
                         )
                     else:
                         self._history_done.set()

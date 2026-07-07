@@ -31,6 +31,7 @@ from .models import (
     HaiShowerState,
     HaiUsageRecord,
 )
+from .protocol import repair_stored_usage_records
 from .statistics import async_import_usage_records
 from .usage_store import HaiUsageRecordStore, HaiUsageSnapshot
 
@@ -310,6 +311,41 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
             self._usage_storage_key,
             legacy_keys=(self._address,),
         )
+        records = snapshot.records
+        repaired_records, repaired_count = repair_stored_usage_records(
+            records, self.client.device_key
+        )
+        if repaired_count:
+            _LOGGER.info(
+                "Repaired misdecoded timestamps on %d/%d stored usage records for %s",
+                repaired_count,
+                len(records),
+                self._address,
+            )
+            snapshot = HaiUsageSnapshot(
+                records=repaired_records,
+                lifetime_total_water_ml=snapshot.lifetime_total_water_ml,
+                lifetime_shower_count=snapshot.lifetime_shower_count,
+                lifetime_last_session_id=snapshot.lifetime_last_session_id,
+                last_seen_at=snapshot.last_seen_at,
+            )
+            await self._usage_store.async_save_snapshot(
+                self._usage_storage_key, snapshot
+            )
+            try:
+                await async_import_usage_records(
+                    self.hass,
+                    self._address,
+                    repaired_records,
+                    statistic_identity=self._device_id,
+                    ignore_last_imported=True,
+                )
+            except Exception as stats_err:
+                _LOGGER.debug(
+                    "Statistics backfill skipped after timestamp repair for %s: %s",
+                    self._address,
+                    stats_err,
+                )
         self._stored_usage_records = snapshot.records
         self._lifetime_total_water_ml = snapshot.lifetime_total_water_ml
         self._lifetime_shower_count = snapshot.lifetime_shower_count
@@ -428,8 +464,8 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
     ) -> list[HaiUsageRecord]:
         """Merge persisted and newly synced records without duplicates.
 
-        Keyed and sorted by session_id only — the start_time field is
-        unreliable (device timestamps are offset from Unix epoch; H32) so
+        Keyed and sorted by session_id only — start_time can be wrong when
+        stored records were parsed with the retired mixed-format model, so
         using it for ordering risks misclassifying the latest session as
         older than stale records and trimming it under the storage cap.
         session_id is a monotonically increasing device counter and is the

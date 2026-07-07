@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from .const import UUIDS
 from .models import HaiUsageRecord
@@ -256,16 +256,109 @@ def encode_led_config(
     return bytes(_encrypt_decrypt(buf, key))
 
 
+def _xor_decrypt_at_offset(
+    payload: bytes, key: list[int], offset: int
+) -> bytes:
+    """XOR-decrypt *payload* using key bytes starting at *offset*."""
+
+    if not key:
+        return bytes(payload)
+    decrypted = bytearray(payload)
+    for index in range(len(decrypted)):
+        decrypted[index] ^= key[(offset + index) % len(key)]
+    return bytes(decrypted)
+
+
+def usage_record_start_time_likely_misdecoded(
+    start_time: datetime,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Return whether a stored start time matches the plaintext misread symptom.
+
+    When bytes ``[12:16]`` are XOR-encrypted on the wire but interpreted as
+    plaintext, the decoded epoch lands roughly two years in the future.
+    """
+
+    reference = now or datetime.now(UTC)
+    if start_time.tzinfo is None:
+        start_time = start_time.replace(tzinfo=UTC)
+    else:
+        start_time = start_time.astimezone(UTC)
+    if start_time.year >= reference.year + 2:
+        return True
+    return start_time > reference + timedelta(days=7)
+
+
+def repair_stored_usage_record(
+    record: HaiUsageRecord, key: list[int]
+) -> HaiUsageRecord | None:
+    """Repair a persisted record whose trailing fields were plaintext-read.
+
+    Storage only keeps decoded scalars, not the original wire bytes.  The wrong
+    ``start_time`` integer is therefore the little-endian interpretation of the
+    encrypted timestamp bytes, and XOR-decrypting those four bytes recovers the
+    true UTC epoch.  The same applies to ``initial_temp_centicelsius``.
+    """
+
+    if not key or not usage_record_start_time_likely_misdecoded(record.start_time):
+        return None
+
+    wrong_epoch = int(record.start_time.timestamp())
+    repaired_epoch = int.from_bytes(
+        _xor_decrypt_at_offset(wrong_epoch.to_bytes(4, "little"), key, 12),
+        "little",
+    )
+    repaired_initial_temp = int.from_bytes(
+        _xor_decrypt_at_offset(
+            record.initial_temp_centicelsius.to_bytes(2, "little"), key, 16
+        ),
+        "little",
+    )
+    try:
+        repaired_start = datetime.fromtimestamp(repaired_epoch, UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
+    if usage_record_start_time_likely_misdecoded(repaired_start):
+        return None
+
+    return HaiUsageRecord(
+        session_id=record.session_id,
+        average_temp_centicelsius=record.average_temp_centicelsius,
+        duration_seconds=record.duration_seconds,
+        volume_milliliters=record.volume_milliliters,
+        start_time=repaired_start,
+        initial_temp_centicelsius=repaired_initial_temp,
+    )
+
+
+def repair_stored_usage_records(
+    records: list[HaiUsageRecord], key: list[int]
+) -> tuple[list[HaiUsageRecord], int]:
+    """Return records with misdecoded timestamps repaired in-place order."""
+
+    repaired_records: list[HaiUsageRecord] = []
+    repaired_count = 0
+    for record in records:
+        repaired = repair_stored_usage_record(record, key)
+        if repaired is not None:
+            repaired_records.append(repaired)
+            repaired_count += 1
+        else:
+            repaired_records.append(record)
+    return repaired_records, repaired_count
+
+
 def parse_usage_record(
     payload: bytes, key: list[int] | None = None
 ) -> HaiUsageRecord | None:
     """Parse a usage record notification from E6221603.
 
     Live runtime validation proved that usage records are XOR-encrypted with
-    the device key, contrary to the initial reverse-engineering finding that
-    classified them as plaintext.  When *key* is provided, the first 18 bytes
-    are decrypted before field extraction.  The all-zero terminator check runs
-    **before** decryption so the end-of-sync marker is still detected.
+    the device key across the full 18-byte payload.  When *key* is provided,
+    all 18 bytes are decrypted before field extraction.  The all-zero
+    terminator check runs **before** decryption so the end-of-sync marker is
+    still detected.
     """
 
     if not payload:
@@ -277,13 +370,7 @@ def parse_usage_record(
 
     data = bytearray(payload[:18])
     if key:
-        # Runtime validation shows usage records are mixed-format: the first
-        # 12 bytes (session id, average temp, duration, volume) are XOR-
-        # encrypted, but the trailing timestamp + initial temperature bytes
-        # are already plaintext.
-        encrypted = bytearray(data)
-        encrypted[0:12] = _encrypt_decrypt(encrypted[0:12], key)
-        data = encrypted
+        data = bytearray(_encrypt_decrypt(data, key))
 
     session_id = int.from_bytes(data[0:4], "little")
     average_temp_centicelsius = int.from_bytes(data[4:6], "little")
@@ -300,6 +387,41 @@ def parse_usage_record(
         start_time=datetime.fromtimestamp(start_timestamp, UTC),
         initial_temp_centicelsius=initial_temp_centicelsius,
     )
+
+
+def usage_record_start_time_debug(
+    payload: bytes, key: list[int] | None = None
+) -> str:
+    """Return a debug string comparing both readings of the start_time field.
+
+    Logs both plaintext and XOR-decrypted interpretations of the raw timestamp
+    bytes.  Useful when validating parser changes against a real-device capture.
+    """
+
+    if not payload or len(payload) < 18:
+        return "start_time_debug=<payload too short>"
+
+    raw_ts = bytes(payload[12:16])
+    parts = [f"raw_ts={raw_ts.hex()}"]
+
+    def _fmt(epoch: int) -> str:
+        try:
+            return datetime.fromtimestamp(epoch, UTC).isoformat()
+        except (OverflowError, OSError, ValueError):
+            return "<invalid>"
+
+    plain_epoch = int.from_bytes(raw_ts, "little")
+    parts.append(f"plaintext_epoch={plain_epoch}")
+    parts.append(f"plaintext_dt={_fmt(plain_epoch)}")
+
+    if key:
+        dec_epoch = int.from_bytes(_xor_decrypt_at_offset(raw_ts, key, 12), "little")
+        dec = dec_epoch.to_bytes(4, "little")
+        parts.append(f"decrypted_ts={bytes(dec).hex()}")
+        parts.append(f"decrypted_epoch={dec_epoch}")
+        parts.append(f"decrypted_dt={_fmt(dec_epoch)}")
+
+    return " ".join(parts)
 
 
 def centicelsius_to_celsius(value: int | None) -> float | None:
