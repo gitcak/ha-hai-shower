@@ -155,6 +155,12 @@ class HaiShowerBleClient:
         self._expected_disconnect_client: BleakClient | None = None
         self._post_disconnect_wait_until: float = 0.0
         self._pending_alert_config_write = False
+        # Byte-for-byte copy of the last led_config payload actually written to
+        # the device.  Used to skip redundant re-pushes on idle reconnects so
+        # the device LED does not blink on every ~30s poll
+        # (gitcak/ha-hai-shower#1).  Reset on disconnect events that could have
+        # cleared the device-side volatile config.
+        self._last_written_led_config: bytes | None = None
         self._idle_polls_while_subscribed = 0
         # Overridable per-instance so tests can exercise the timeout path
         # without a real multi-second wait; production always uses the
@@ -303,6 +309,11 @@ class HaiShowerBleClient:
             self._expected_disconnect_client = None
             _LOGGER.debug("Expected disconnect completed on %s", self.address)
             return
+        # Unexpected drop: the device may have reset and cleared its volatile
+        # led_config.  Forget the cached payload so the next connection
+        # re-pushes it defensively (issue #1 keeps expected idle disconnects
+        # cached; only genuine drops invalidate).
+        self._last_written_led_config = None
         self._set_error_state(
             "ble_disconnected",
             detail=HaiLifecycleDetail.DISCONNECT_CALLBACK,
@@ -1205,11 +1216,23 @@ class HaiShowerBleClient:
             temp_color_rgb=COLOR_RGB[str(settings["temp_color_name"])],
             key=self._key,
         )
+        payload_bytes = bytes(payload)
+        if payload_bytes == self._last_written_led_config:
+            # Identical to what the device already holds; skip the GATT write so
+            # the LED does not blink on every idle reconnect (issue #1).  A real
+            # device reset clears _last_written_led_config, so the defensive
+            # re-push still happens when the device may have actually lost it.
+            _LOGGER.debug(
+                "Skipping redundant led_config write on %s (payload unchanged)",
+                self.address,
+            )
+            return
         await self._write_characteristic(
             UUIDS["led_config"].characteristic,
             payload,
             log_label="led_config",
         )
+        self._last_written_led_config = payload_bytes
 
     async def async_write_water_threshold(self, value_liters: float) -> None:
         """Write water-use alert threshold to E6221503."""
