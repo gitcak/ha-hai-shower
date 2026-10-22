@@ -20,6 +20,9 @@ PLATFORMS: list[str] = ["sensor", "button", "number", "select", "switch"]
 STORAGE_VERSION = 1
 USAGE_RECORDS_STORAGE_KEY = f"{DOMAIN}_usage_records"
 MAX_STORED_USAGE_RECORDS = 250
+# Imported sessions remembered for late-session statistics; kept well above
+# the record cap so a session trimmed from the cache is still known.
+MAX_TRACKED_IMPORTED_SESSIONS = 1000
 ENTITY_KEYS: tuple[str, ...] = (
     "history_sync",
     "water_alert_threshold",

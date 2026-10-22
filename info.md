@@ -15,7 +15,7 @@ After a one-time cloud login during setup, everything runs locally over BLE. No 
 
 ## Requirements
 
-- Home Assistant 2024.1 or newer
+- Home Assistant 2026.6 or newer
 - A Hai Smart Shower
 - Bluetooth connectivity (ESPHome proxy recommended)
 - Hai account credentials for the one-time setup

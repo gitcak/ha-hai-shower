@@ -9,7 +9,7 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_ADDRESS, CONF_DEVICE_ID, DOMAIN, stable_device_identity
+from .const import CONF_ADDRESS, CONF_DEVICE_ID, stable_device_identity
 from .entity import HaiShowerEntity
 
 
@@ -33,7 +33,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Hai Shower buttons from a config entry."""
-    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     address = entry.data[CONF_ADDRESS]
     device_identifier = stable_device_identity(entry.data.get(CONF_DEVICE_ID), address)
     async_add_entities(

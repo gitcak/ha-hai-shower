@@ -32,6 +32,8 @@ from .protocol import (
     encode_rtc_sync,
     encode_temp_threshold,
     encode_water_threshold,
+    format_firmware_version,
+    parse_advertised_firmware,
     parse_usage_record,
     usage_record_start_time_debug,
 )
@@ -63,6 +65,17 @@ IDLE_POLLS_BEFORE_INFERRED_SHOWER_END = 2
 # instead of hanging `_operation_lock` — and therefore the entire
 # integration's refresh/subscribe/write/history-sync operations — forever.
 GATT_OPERATION_TIMEOUT_SECONDS = 10.0
+# The Hai app waits up to 120 s for the end-of-history marker (DeviceBloc
+# _syncShowerData races the transfer against _timeoutPromise(120)).
+HISTORY_SYNC_TIMEOUT_SECONDS = 120.0
+# Minimum spacing between RTC writes. The app never writes the clock on
+# connect (it writes cloud-supplied bytes after a history upload), so writing
+# on every 30 s poll reconnect only adds proxy traffic.
+RTC_SYNC_INTERVAL_SECONDS = 3600.0
+# Fallbacks for alert settings HA has never set, matching the Hai app's
+# settings form (15 gal, 90 °F).
+DEFAULT_WATER_ALERT_THRESHOLD_LITERS = 56.8
+DEFAULT_TEMP_ALERT_THRESHOLD_CELSIUS = 32.2
 
 
 async def _await_gatt_operation(awaitable, *, timeout: float, operation: str):
@@ -151,6 +164,11 @@ class HaiShowerBleClient:
         self._history_done: asyncio.Event = asyncio.Event()
         self._operation_lock: asyncio.Lock = asyncio.Lock()
         self._skip_version_reads = False
+        self._advertised_firmware: int | None = None
+        # Set when a GATT read times out. Read helpers swallow their own
+        # BleakError, so this is how a refresh notices a wedged transport.
+        self._read_timed_out = False
+        self._last_rtc_sync_monotonic: float | None = None
         self._shutting_down = False
         self._expected_disconnect_client: BleakClient | None = None
         self._post_disconnect_wait_until: float = 0.0
@@ -179,6 +197,41 @@ class HaiShowerBleClient:
     def is_connected(self) -> bool:
         """Return whether the BLE client has an active connection."""
         return self._client is not None and self._client.is_connected
+
+    @property
+    def manages_alert_config(self) -> bool:
+        """Return whether HA has set any alert setting for this device."""
+        state = self._state
+        return any(
+            value is not None
+            for value in (
+                state.water_alert_threshold_liters,
+                state.temp_alert_threshold_celsius,
+                state.water_alert_enabled,
+                state.temp_alert_enabled,
+                state.water_led_color,
+                state.temp_led_color,
+            )
+        )
+
+    def apply_advertisement(self, manufacturer_data: dict[int, bytes]) -> bool:
+        """Take the firmware version from an advertisement; True if it changed."""
+        parsed = parse_advertised_firmware(manufacturer_data)
+        if parsed is None:
+            return False
+        firmware, bootloader = parsed
+        if firmware == self._advertised_firmware:
+            return False
+        self._advertised_firmware = firmware
+        self._state.firmware_version = format_firmware_version(firmware)
+        _LOGGER.debug(
+            "Advertised firmware on %s: %s (raw %d, bootloader %s)",
+            self.address,
+            self._state.firmware_version,
+            firmware,
+            bootloader,
+        )
+        return True
 
     @property
     def has_pending_alert_config_write(self) -> bool:
@@ -285,11 +338,18 @@ class HaiShowerBleClient:
         _LOGGER.debug("Connected to %s", self.address)
         self._post_disconnect_wait_until = 0.0
         self._client = client
-        await self._sync_rtc(client)
+        await self._maybe_sync_rtc(client)
         return client
 
     def _handle_disconnect(self, _client: BleakClient) -> None:
         """Handle disconnect callbacks from Bleak."""
+        if self._client is not None and _client is not self._client:
+            # A late callback from a client already replaced by a fresh
+            # connection must not tear down the live one.
+            if self._expected_disconnect_client is _client:
+                self._expected_disconnect_client = None
+            _LOGGER.debug("Ignoring disconnect from stale client on %s", self.address)
+            return
         _LOGGER.debug("Disconnected from %s", self.address)
         self._post_disconnect_wait_until = max(
             self._post_disconnect_wait_until,
@@ -389,11 +449,16 @@ class HaiShowerBleClient:
 
     async def _read_char(self, client: BleakClient, characteristic: str) -> bytes:
         """Read a characteristic, bounded by ``GATT_OPERATION_TIMEOUT_SECONDS``."""
-        return await _await_gatt_operation(
-            client.read_gatt_char(characteristic),
-            timeout=self._gatt_timeout_s,
-            operation="read_gatt_char",
-        )
+        try:
+            return await _await_gatt_operation(
+                client.read_gatt_char(characteristic),
+                timeout=self._gatt_timeout_s,
+                operation="read_gatt_char",
+            )
+        except BleakError as err:
+            if isinstance(err.__cause__, TimeoutError):
+                self._read_timed_out = True
+            raise
 
     async def _write_char(
         self,
@@ -428,18 +493,27 @@ class HaiShowerBleClient:
             operation="stop_notify",
         )
 
+    async def _maybe_sync_rtc(self, client: BleakClient) -> None:
+        """Sync the RTC unless it was synced within RTC_SYNC_INTERVAL_SECONDS."""
+        last = self._last_rtc_sync_monotonic
+        if last is None or time.monotonic() - last >= RTC_SYNC_INTERVAL_SECONDS:
+            await self._sync_rtc(client)
+
     async def _sync_rtc(self, client: BleakClient) -> None:
         """Write the current UTC epoch to the shower's RTC sync characteristic.
 
-        The Hai app performs this on every connect to keep usage-record
-        timestamps accurate.  The payload is a 4-byte little-endian UTC epoch
-        encrypted with the same XOR key as other 4-byte config writes.
+        The Hai app never computes this value: it writes encrypted bytes the
+        Hai cloud returns after each history upload. This UInt32LE UTC epoch,
+        XORed with the device key, is the integration's own encoding; stored
+        session start times decode as plausible local shower times with it.
+        Called on connect at most once per RTC_SYNC_INTERVAL_SECONDS.
         """
         char = UUIDS["rtc_sync"]
         epoch = int(time.time())
         payload = encode_rtc_sync(epoch, self._key)
         try:
             await self._write_char(client, char.characteristic, payload, response=True)
+            self._last_rtc_sync_monotonic = time.monotonic()
             _LOGGER.debug(
                 "RTC synced on %s to epoch %d (payload=%s)",
                 self.address,
@@ -490,6 +564,7 @@ class HaiShowerBleClient:
                     HaiLifecycleState.MONITORING,
                     detail=HaiLifecycleDetail.REFRESH_READING,
                 )
+            self._read_timed_out = False
             try:
                 client = await self._ensure_connected()
                 await self._read_battery(client)
@@ -549,8 +624,12 @@ class HaiShowerBleClient:
                 # Re-push alert/LED config on every fresh idle connection.  The
                 # device stores this config in volatile RAM and loses it on
                 # firmware restart, but runtime evidence shows led_config writes
-                # during active notifications can crash the shower head.
-                if not already_connected or self._pending_alert_config_write:
+                # during active notifications can crash the shower head.  Only
+                # done once HA manages an alert setting: otherwise the push
+                # would overwrite what the user set in the Hai app.
+                if self._pending_alert_config_write or (
+                    not already_connected and self.manages_alert_config
+                ):
                     wrote_alert_config = await self._write_alert_config_when_safe(
                         "refresh"
                     )
@@ -684,6 +763,10 @@ class HaiShowerBleClient:
 
     async def _read_version(self, client: BleakClient) -> None:
         """Read and decrypt firmware version."""
+        if self._advertised_firmware is not None:
+            # The advertisement carries the version the app itself uses; the
+            # GATT decode below is unconfirmed on led_config firmware.
+            return
         char = UUIDS["version"]
         try:
             raw = await self._read_char(client, char.characteristic)
@@ -1029,7 +1112,9 @@ class HaiShowerBleClient:
                     client, trigger.characteristic, b"\x00", response=True
                 )
                 _LOGGER.debug("History sync triggered on %s", self.address)
-                await asyncio.wait_for(self._history_done.wait(), timeout=30.0)
+                await asyncio.wait_for(
+                    self._history_done.wait(), timeout=HISTORY_SYNC_TIMEOUT_SECONDS
+                )
             except TimeoutError:
                 _LOGGER.warning("History sync timed out on %s", self.address)
                 self._usage_records = []
@@ -1088,9 +1173,14 @@ class HaiShowerBleClient:
             return self._usage_records
 
     def _raise_if_disconnected(self, client: BleakClient) -> None:
-        """Stop a refresh as soon as the client drops mid-cycle."""
+        """Stop a refresh as soon as the client drops or a read hangs."""
         if not client.is_connected:
             raise BleakError("ble_disconnected_during_refresh")
+        if self._read_timed_out:
+            self._read_timed_out = False
+            raise BleakError(
+                "read_gatt_char timed out; Bluetooth transport is not responding"
+            )
 
     def _alert_defaults(self) -> dict[str, object]:
         """Build a full alert-config snapshot for composite writes.
@@ -1116,10 +1206,22 @@ class HaiShowerBleClient:
         )
         return {
             "water_threshold_ml": int(
-                round((self._state.water_alert_threshold_liters or 20.0) * 1000)
+                round(
+                    (
+                        self._state.water_alert_threshold_liters
+                        or DEFAULT_WATER_ALERT_THRESHOLD_LITERS
+                    )
+                    * 1000
+                )
             ),
             "temp_threshold_cc": int(
-                round((self._state.temp_alert_threshold_celsius or 38.0) * 100)
+                round(
+                    (
+                        self._state.temp_alert_threshold_celsius
+                        or DEFAULT_TEMP_ALERT_THRESHOLD_CELSIUS
+                    )
+                    * 100
+                )
             ),
             "water_alert_enabled": water_enabled,
             "temp_alert_enabled": temp_enabled,
@@ -1170,6 +1272,27 @@ class HaiShowerBleClient:
         await self._write_alert_config()
         self._pending_alert_config_write = False
         return True
+
+    async def _device_has_led_config(self) -> bool:
+        """Return whether the connected shower exposes the led_config characteristic.
+
+        Firmware below 550 has no led_config (E622150D) and takes the water
+        threshold and LED colours on their own characteristics, which is how
+        v0.1.18 and earlier wrote them. Only a completed service discovery
+        that lacks the characteristic selects that legacy path; anything
+        undetermined keeps the composite write the Hai app uses.
+        """
+        client = await self._ensure_connected()
+        try:
+            services = getattr(client, "services", None)
+        except BleakError:
+            return True
+        if services is None or not getattr(services, "services", None):
+            return True
+        return (
+            services.get_characteristic(UUIDS["led_config"].characteristic)
+            is not None
+        )
 
     async def _write_alert_config(self, **overrides: object) -> None:
         """Write the composite led_config payload with updated settings."""
@@ -1235,22 +1358,21 @@ class HaiShowerBleClient:
         self._last_written_led_config = payload_bytes
 
     async def async_write_water_threshold(self, value_liters: float) -> None:
-        """Write water-use alert threshold to E6221503."""
+        """Write water-use alert threshold through the composite led_config."""
         async with self._operation_lock:
             value_ml = int(round(value_liters * 1000))
             try:
-                payload = encode_water_threshold(value_ml, self._key)
                 if self._alert_config_write_unsafe_now():
                     self._state.water_alert_threshold_liters = value_liters
                     self._defer_alert_config_write("water_threshold")
                     return
-                if self._pending_alert_config_write:
+                if await self._device_has_led_config():
                     await self._write_alert_config(water_threshold_ml=value_ml)
                     self._pending_alert_config_write = False
                 else:
                     await self._write_characteristic(
                         UUIDS["water_threshold"].characteristic,
-                        payload,
+                        encode_water_threshold(value_ml, self._key),
                         log_label="water_threshold",
                     )
                 self._state.water_alert_threshold_liters = value_liters
@@ -1286,13 +1408,11 @@ class HaiShowerBleClient:
                 raise
 
     async def async_write_led_color(self, target: str, color_name: str) -> None:
-        """Write LED alert color to E6221508 (water) or E6221509 (temp)."""
+        """Write an LED alert color through the composite led_config."""
         async with self._operation_lock:
             if color_name not in COLOR_RGB:
                 raise ValueError(f"Unknown Hai alert color: {color_name}")
-            characteristic = UUIDS["water_led_color"] if target == "water" else UUIDS["temp_led_color"]
             try:
-                payload = encode_led_color(COLOR_RGB[color_name], self._key)
                 if self._alert_config_write_unsafe_now():
                     if target == "water":
                         self._state.water_led_color = color_name
@@ -1300,16 +1420,21 @@ class HaiShowerBleClient:
                         self._state.temp_led_color = color_name
                     self._defer_alert_config_write(f"{target}_led_color")
                     return
-                if self._pending_alert_config_write:
+                if await self._device_has_led_config():
                     override_key = (
                         "water_color_name" if target == "water" else "temp_color_name"
                     )
                     await self._write_alert_config(**{override_key: color_name})
                     self._pending_alert_config_write = False
                 else:
+                    characteristic = (
+                        UUIDS["water_led_color"]
+                        if target == "water"
+                        else UUIDS["temp_led_color"]
+                    )
                     await self._write_characteristic(
                         characteristic.characteristic,
-                        payload,
+                        encode_led_color(COLOR_RGB[color_name], self._key),
                         log_label=f"{target}_led_color",
                     )
                 if target == "water":

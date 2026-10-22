@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 
 from .const import UUIDS
@@ -31,8 +32,14 @@ _DATA_LENGTH: dict[str, int] = {
     UUIDS["water_threshold"].characteristic: 4,  # UInt32LE, milliliters
 }
 
-# Characteristics where byte order is reversed after decrypt.
-_REVERSE_CHARS: set[str] = set()  # None observed; placeholder if needed.
+# Characteristics where byte order is reversed after decrypt
+# (GattSchema.isReverse): the LED colors, so they read back as [R, G, B].
+# encode_led_color packs [R, G, B] directly, which is the same wire order.
+_REVERSE_CHARS: set[str] = {
+    UUIDS["water_led_color_old"].characteristic,
+    UUIDS["water_led_color"].characteristic,
+    UUIDS["temp_led_color"].characteristic,
+}
 
 
 def _encrypt_decrypt(data: bytearray, key: list[int]) -> bytearray:
@@ -134,40 +141,37 @@ def decrypt_characteristic_debug(
 # ---------------------------------------------------------------
 # Phase 2: BLE write encoding helpers (confirmed from RE artifacts)
 # ---------------------------------------------------------------
-# The Hai app writes device settings to led_config (E622150D) as a
-# composite encrypted buffer.  Individual characteristics like
-# water_threshold (E6221503), water_led_color (E6221508), and
-# temp_led_color (E6221509) are read-back mirrors.
+# On firmware >= 550 (devices exposing led_config, E622150D) the Hai app's
+# DeviceBloc.configureDevice writes all alert settings as one 30-byte
+# composite buffer and never writes water_threshold (E6221503) or the LED
+# color characteristics (E6221508/09). Older firmware takes those three
+# individually, with cloud-encrypted values.
 #
 # Buffer layout (before XOR encryption):
-#   [0:4]  UInt32LE  — zero padding / device-id echo
-#   [4:8]  UInt32LE  — zero padding
-#   [8:12] UInt32LE  — waterThresholdMl (milliliters)
-#   [12:14] UInt16LE — tempThresholdCC (centi-Celsius)
-#   [14]   UInt8     — enable bitmask: bit 0 = water color present,
-#                       bit 1 = temp color present
-#   [15:19] UInt32LE — zero padding
-#   [19:23] UInt32LE — zero padding
-#   [23]   UInt8     — zero padding
-#   [24]   UInt8     — waterColorRGB >> 16 & 0xFF (R)
-#   [25]   UInt8     — waterColorRGB >> 8 & 0xFF (G)
-#   [26]   UInt8     — waterColorRGB & 0xFF (B)
-#   [27]   UInt8     — tempColorRGB >> 16 & 0xFF (R)
-#   [28]   UInt8     — tempColorRGB >> 8 & 0xFF (G)
-#   [29]   UInt8     — tempColorRGB & 0xFF (B)
-# The buffer is then encrypted per-characteristic-slice using
-# GattSchema.encryptDecrypt before BLE write.
+#   [0:8]   zero
+#   [8:12]  UInt32LE — waterThresholdMl (milliliters)
+#   [12:14] UInt16LE — tempThresholdCC (centi-Celsius, whatever the UI unit)
+#   [14]    UInt8    — flags: 0x04 = water alert light on,
+#                       0x08 = temperature alert light on
+#   [15:24] zero
+#   [24:27] water color R, G, B
+#   [27:30] temp color R, G, B
+# A disabled alert light is sent as color 0 with its flag clear. The whole
+# buffer is XORed in one pass with GattSchema.encryptDecrypt.
+LED_CONFIG_WATER_ALERT_FLAG = 0x04
+LED_CONFIG_TEMP_ALERT_FLAG = 0x08
 
-# Named color → 24-bit RGB mapping (from Hai app UI).
+# Named color → 24-bit RGB value the Hai app sends to the device
+# (ledColorLists ``color``; ``appColorCode`` is only the on-screen swatch).
 COLOR_RGB: dict[str, int] = {
     "Ruby": 0xFF0000,
-    "Orange": 0xFF8000,
-    "Sun": 0xFFFF00,
-    "Grass": 0x00FF00,
-    "Leaf": 0x008000,
-    "Sky": 0x0080FF,
-    "Plum": 0x800080,
-    "Pink": 0xFF80FF,
+    "Orange": 0xFF2000,
+    "Sun": 0xFFFB13,
+    "Grass": 0x9FFF29,
+    "Leaf": 0x00FF00,
+    "Sky": 0x61E2FF,
+    "Plum": 0x8400A2,
+    "Pink": 0xFF86CC,
     "White": 0xFFFFFF,
 }
 
@@ -226,14 +230,19 @@ def encode_led_config(
     """Encode the composite encrypted led_config payload for E622150D.
 
     The recovered buffer layout is 30 bytes long and carries both alert
-    thresholds, enable bits, and RGB colors. Unused bytes are zero-filled
-    before the whole payload is XOR-encrypted with the device key.
+    thresholds, enable flags, and RGB colors. Unused bytes are zero-filled
+    before the whole payload is XOR-encrypted with the device key. As in the
+    Hai app, a disabled alert light is sent as color 0 with its flag clear.
     """
+    if not water_alert_enabled:
+        water_color_rgb = 0
+    if not temp_alert_enabled:
+        temp_color_rgb = 0
     enable_mask = 0
-    if water_alert_enabled:
-        enable_mask |= 0x01
-    if temp_alert_enabled:
-        enable_mask |= 0x02
+    if water_color_rgb:
+        enable_mask |= LED_CONFIG_WATER_ALERT_FLAG
+    if temp_color_rgb:
+        enable_mask |= LED_CONFIG_TEMP_ALERT_FLAG
 
     buf = bytearray(30)
     buf[8:12] = water_threshold_ml.to_bytes(4, "little", signed=False)
@@ -254,6 +263,33 @@ def encode_led_config(
         ]
     )
     return bytes(_encrypt_decrypt(buf, key))
+
+
+def parse_advertised_firmware(
+    manufacturer_data: Mapping[int, bytes],
+) -> tuple[int, int | None] | None:
+    """Return (firmware, bootloader) versions from a Hai advertisement.
+
+    The Hai app's _parseDeviceInfo reads the manufacturer-specific payload:
+    six serial bytes, a UInt16LE firmware version (e.g. 611 for "6.11") and
+    an optional bootloader byte. Home Assistant strips the 2-byte company ID,
+    so the offsets here are the app's minus two. Payloads that are too short
+    or carry an implausible version are ignored.
+    """
+    for payload in manufacturer_data.values():
+        if len(payload) < 8:
+            continue
+        firmware = int.from_bytes(payload[6:8], "little")
+        if not 100 <= firmware <= 9999:
+            continue
+        bootloader = payload[8] if len(payload) > 8 else None
+        return firmware, bootloader
+    return None
+
+
+def format_firmware_version(version: int) -> str:
+    """Format a Hai firmware number the way the app shows it (611 -> 6.11)."""
+    return f"{version // 100}.{version % 100}"
 
 
 def _xor_decrypt_at_offset(

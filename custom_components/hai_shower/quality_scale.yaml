@@ -10,4 +10,5 @@ rules:
   icon_translations: done
   reauthentication_flow: done
   reconfigure_flow: done
+  runtime_data: done
   unique_config_entry: done

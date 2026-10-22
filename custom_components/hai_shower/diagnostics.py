@@ -13,7 +13,6 @@ from .const import (
     CONF_DEVICE_CODE,
     CONF_DEVICE_ID,
     CONF_DEVICE_KEY,
-    DOMAIN,
 )
 from .coordinator import HaiShowerCoordinator
 
@@ -31,9 +30,6 @@ async def async_get_config_entry_diagnostics(
 ) -> dict[str, Any]:
     """Return diagnostics for a config entry."""
 
-    coordinator: HaiShowerCoordinator = hass.data[DOMAIN][entry.entry_id]
-    state = coordinator.client.state
-
     config_entry = async_redact_data(
         {
             CONF_ADDRESS: entry.data.get(CONF_ADDRESS),
@@ -42,6 +38,12 @@ async def async_get_config_entry_diagnostics(
         },
         REDACT_CONFIG,
     )
+
+    coordinator: HaiShowerCoordinator | None = getattr(entry, "runtime_data", None)
+    if coordinator is None:
+        # Entry is not loaded (e.g. retrying setup); only config is available.
+        return {"config_entry": config_entry, "loaded": False}
+    state = coordinator.client.state
 
     state_data = {
         "available": state.available,

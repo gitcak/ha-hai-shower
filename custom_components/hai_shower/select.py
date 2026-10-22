@@ -15,7 +15,6 @@ from .const import (
     ALERT_COLORS,
     CONF_ADDRESS,
     CONF_DEVICE_ID,
-    DOMAIN,
     stable_device_identity,
 )
 from .entity import HaiShowerEntity
@@ -52,7 +51,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Hai Shower select entities from a config entry."""
-    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     address = entry.data[CONF_ADDRESS]
     device_identifier = stable_device_identity(entry.data.get(CONF_DEVICE_ID), address)
     async_add_entities(

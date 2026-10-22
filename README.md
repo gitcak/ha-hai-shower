@@ -25,7 +25,7 @@ I created this integration by reverse engineering the haiapp APK and retriveing 
 
 ## Requirements
 
-- Home Assistant 2024.1 or newer
+- Home Assistant 2026.6 or newer
 - A Hai Smart Shower
 - An ESPHome Bluetooth proxy within range of the shower (or host Bluetooth)
 - Hai account credentials for the one-time setup

@@ -53,6 +53,12 @@ class HaiShowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._device_id: str = ""
         self._name: str = DEFAULT_NAME
 
+    def async_remove(self) -> None:
+        """Close the cloud session if the flow is abandoned mid-way."""
+        if self._cloud_client is not None:
+            self.hass.async_create_task(self._cloud_client.close())
+            self._cloud_client = None
+
     async def async_step_reauth(self, entry_data: dict[str, Any]) -> FlowResult:
         """Handle a request to refresh cloud bootstrap data for an existing entry."""
         self._address = str(entry_data.get(CONF_ADDRESS, "")).upper()
@@ -90,7 +96,9 @@ class HaiShowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._discovered_addresses = discovered
 
         if user_input is not None:
-            selected = self._extract_address_selection(user_input)
+            selected = self._extract_address_selection(
+                user_input, fallback_address=self._address
+            )
             errors = selected["errors"]
             if not errors:
                 address = selected["address"]
@@ -121,7 +129,6 @@ class HaiShowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             discovered=discovered,
             errors=errors,
             default_name=self._name or DEFAULT_NAME,
-            default_manual_address=self._address or None,
             description_placeholders={"address": self._address, "name": self._name},
         )
 
@@ -194,7 +201,6 @@ class HaiShowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             discovered=discovered,
             errors=errors,
             default_name=DEFAULT_NAME,
-            default_discovered_address=next(iter(discovered)) if len(discovered) == 1 else None,
         )
 
     async def async_step_bluetooth(
@@ -223,8 +229,14 @@ class HaiShowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 if str(entry.data.get(CONF_ADDRESS, "")).upper() == address:
                     return self.async_abort(reason="already_configured")
 
+        # Keyed by address until the cloud step replaces it with the stable
+        # device ID; HA needs a unique ID here to support "Ignore".
+        await self.async_set_unique_id(address)
+        self._abort_if_unique_id_configured()
+
         self._address = address
         self._name = discovery_info.name or DEFAULT_NAME
+        self.context["title_placeholders"] = {"name": self._name}
         _LOGGER.debug(
             "Accepted Bluetooth discovery for %s (%s)",
             self._address,
@@ -317,7 +329,7 @@ class HaiShowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 self._cloud_client = None
             return self.async_abort(reason="no_selectable_devices")
 
-        if self._address:
+        if self._address and user_input is None:
             product_id = await async_read_product_id(self.hass, self._address)
             if product_id and product_id in device_map:
                 _LOGGER.info(
@@ -448,8 +460,10 @@ class HaiShowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if self.source == "reauth":
             entry = self._get_reauth_entry()
-            expected_device_id = str(entry.data.get(CONF_DEVICE_ID, ""))
-            if device_id != expected_device_id:
+            expected_device_id = str(entry.data.get(CONF_DEVICE_ID) or "")
+            # Entries that never stored a device ID have nothing to match
+            # against, so the device picked here becomes the entry's device.
+            if expected_device_id and device_id != expected_device_id:
                 _LOGGER.warning(
                     "Hai reauth selected wrong device %s for entry %s (expected %s)",
                     short_id(device_id),
@@ -551,6 +565,7 @@ class HaiShowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         user_input: dict[str, str],
         *,
         discovered: dict[str, str] | None = None,
+        fallback_address: str | None = None,
     ) -> dict[str, object]:
         """Validate discovered/manual address input and return the selected address."""
         errors: dict[str, str] = {}
@@ -563,7 +578,12 @@ class HaiShowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if chosen_address and manual_address:
             errors["base"] = "choose_one_address"
         else:
-            address = chosen_address or manual_address or (single_address or "")
+            address = (
+                chosen_address
+                or manual_address
+                or single_address
+                or (fallback_address or "").upper()
+            )
             if not address:
                 _LOGGER.debug("Config flow address step has no selected or manual address")
                 errors["base"] = "no_address"
@@ -585,8 +605,6 @@ class HaiShowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         discovered: dict[str, str],
         errors: dict[str, str],
         default_name: str,
-        default_discovered_address: str | None = None,
-        default_manual_address: str | None = None,
         description_placeholders: dict[str, str] | None = None,
     ) -> FlowResult:
         """Render a discovered/manual address selection form."""
@@ -604,18 +622,13 @@ class HaiShowerConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id=step_id,
             data_schema=vol.Schema(
                 {
-                    vol.Optional(
-                        "discovered_device",
-                        default=(
-                            default_discovered_address
-                            if default_discovered_address
-                            else vol.UNDEFINED
-                        ),
-                    ): discovered_selector if discovered else str,
-                    vol.Optional(
-                        CONF_ADDRESS,
-                        default=default_manual_address or vol.UNDEFINED,
-                    ): str,
+                    # No defaults on the two address fields: HA re-applies a
+                    # default when a field is left empty, so a pre-filled
+                    # value would always collide with the other field.
+                    vol.Optional("discovered_device"): (
+                        discovered_selector if discovered else str
+                    ),
+                    vol.Optional(CONF_ADDRESS): str,
                     vol.Optional(CONF_NAME, default=default_name): str,
                 }
             ),

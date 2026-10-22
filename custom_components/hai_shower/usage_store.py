@@ -12,7 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 
 from .const import STORAGE_VERSION, USAGE_RECORDS_STORAGE_KEY
-from .models import HaiUsageRecord
+from .models import HaiImportedSessions, HaiUsageRecord
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,6 +26,8 @@ class HaiUsageSnapshot:
     lifetime_shower_count: int
     lifetime_last_session_id: int | None
     last_seen_at: datetime | None = None
+    # None until the first statistics import seeds it.
+    imported_sessions: HaiImportedSessions | None = None
 
     @classmethod
     def from_records(cls, records: list[HaiUsageRecord]) -> "HaiUsageSnapshot":
@@ -163,6 +165,9 @@ def _snapshot_from_storage_value(
         lifetime_last_session_id = derived.lifetime_last_session_id
 
     last_seen_at = _optional_utc_datetime(value.get("last_seen_at"))
+    imported_sessions = _imported_sessions_from_storage(
+        value.get("statistics_imported"), storage_key
+    )
 
     snapshot = HaiUsageSnapshot(
         records=records,
@@ -170,6 +175,7 @@ def _snapshot_from_storage_value(
         lifetime_shower_count=lifetime_shower_count,
         lifetime_last_session_id=lifetime_last_session_id,
         last_seen_at=last_seen_at,
+        imported_sessions=imported_sessions,
     )
     return snapshot, _snapshot_to_dict(snapshot) != value
 
@@ -201,7 +207,59 @@ def _snapshot_to_dict(snapshot: HaiUsageSnapshot) -> dict[str, Any]:
     }
     if snapshot.last_seen_at is not None:
         payload["last_seen_at"] = snapshot.last_seen_at.isoformat()
+    if snapshot.imported_sessions is not None:
+        payload["statistics_imported"] = {
+            "since": snapshot.imported_sessions.since,
+            "sessions": [
+                [session_id, hour_ts]
+                for session_id, hour_ts in sorted(
+                    snapshot.imported_sessions.sessions.items()
+                )
+            ],
+        }
     return payload
+
+
+def _imported_sessions_from_storage(
+    value: object, storage_key: str
+) -> HaiImportedSessions | None:
+    """Parse imported-session tracking, or None to have it re-seeded.
+
+    Dropping invalid tracking is safe: the statistics importer then falls
+    back to comparing session counts with the recorded buckets.
+    """
+    if value is None:
+        return None
+    try:
+        if not isinstance(value, dict):
+            raise TypeError("tracking is not an object")
+        since = value["since"]
+        raw_sessions = value["sessions"]
+        if isinstance(since, bool) or not isinstance(since, (int, float)):
+            raise TypeError("since is not a number")
+        if not isinstance(raw_sessions, list):
+            raise TypeError("sessions is not a list")
+        sessions: dict[int, float] = {}
+        for item in raw_sessions:
+            if not isinstance(item, list) or len(item) != 2:
+                raise TypeError("session entry is not a pair")
+            session_id, hour_ts = item
+            if (
+                isinstance(session_id, bool)
+                or not isinstance(session_id, int)
+                or isinstance(hour_ts, bool)
+                or not isinstance(hour_ts, (int, float))
+            ):
+                raise TypeError("session entry has invalid values")
+            sessions[session_id] = float(hour_ts)
+    except (KeyError, TypeError) as err:
+        _LOGGER.warning(
+            "Ignoring invalid statistics import tracking for %s: %s",
+            storage_key,
+            err,
+        )
+        return None
+    return HaiImportedSessions(since=float(since), sessions=sessions)
 
 
 def _optional_utc_datetime(value: object) -> datetime | None:

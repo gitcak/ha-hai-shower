@@ -100,6 +100,19 @@ class HaiUsageRecord:
     initial_temp_centicelsius: int
 
 
+@dataclass(frozen=True, slots=True)
+class HaiImportedSessions:
+    """Sessions already written to long-term statistics.
+
+    ``sessions`` maps a session_id to the UTC hour timestamp of the bucket it
+    was counted in. Closed sessions in hours before ``since`` are outside the
+    tracked window and are treated as imported.
+    """
+
+    since: float
+    sessions: dict[int, float] = field(default_factory=dict)
+
+
 @dataclass(slots=True)
 class HaiShowerState:
     """Current coordinator state."""

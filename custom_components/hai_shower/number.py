@@ -16,7 +16,7 @@ from homeassistant.const import EntityCategory, UnitOfTemperature, UnitOfVolume
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import CONF_ADDRESS, CONF_DEVICE_ID, DOMAIN, stable_device_identity
+from .const import CONF_ADDRESS, CONF_DEVICE_ID, stable_device_identity
 from .entity import HaiShowerEntity
 from .models import HaiShowerState
 
@@ -33,9 +33,10 @@ NUMBERS: tuple[HaiShowerNumberDescription, ...] = (
         translation_key="water_alert_threshold",
         device_class=NumberDeviceClass.VOLUME,
         native_unit_of_measurement=UnitOfVolume.LITERS,
-        native_min_value=10.0,
-        native_max_value=100.0,
-        native_step=1.0,
+        # Hai app: at least 2 gal, no upper limit.
+        native_min_value=7.5,
+        native_max_value=400.0,
+        native_step=0.5,
         mode=NumberMode.SLIDER,
         entity_category=EntityCategory.CONFIG,
         value_fn=lambda state: state.water_alert_threshold_liters,
@@ -45,8 +46,9 @@ NUMBERS: tuple[HaiShowerNumberDescription, ...] = (
         translation_key="temp_alert_threshold",
         device_class=NumberDeviceClass.TEMPERATURE,
         native_unit_of_measurement=UnitOfTemperature.CELSIUS,
-        native_min_value=30.0,
-        native_max_value=50.0,
+        # Hai app: 33-120 °F.
+        native_min_value=1.0,
+        native_max_value=48.5,
         native_step=0.5,
         mode=NumberMode.SLIDER,
         entity_category=EntityCategory.CONFIG,
@@ -61,7 +63,7 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up Hai Shower number entities from a config entry."""
-    coordinator = hass.data[DOMAIN][entry.entry_id]
+    coordinator = entry.runtime_data
     address = entry.data[CONF_ADDRESS]
     device_identifier = stable_device_identity(entry.data.get(CONF_DEVICE_ID), address)
     async_add_entities(

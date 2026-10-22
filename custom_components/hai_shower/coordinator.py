@@ -7,8 +7,10 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 import logging
 
+from homeassistant.components import bluetooth
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.helpers.event import async_track_utc_time_change
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .ble import HaiShowerBleClient
@@ -26,6 +28,7 @@ from .const import (
     usage_storage_key,
 )
 from .models import (
+    HaiImportedSessions,
     HaiLifecycleDetail,
     HaiLifecycleState,
     HaiShowerState,
@@ -38,6 +41,10 @@ from .usage_store import HaiUsageRecordStore, HaiUsageSnapshot
 _LOGGER = logging.getLogger(__name__)
 POST_HISTORY_SYNC_REFRESH_COOLDOWN_SECONDS = 20.0
 LAST_SEEN_PERSIST_INTERVAL_SECONDS = 300.0
+# Minute past each UTC hour at which stored records are re-offered to the
+# statistics importer, so a session synced during its own (still open) hour
+# is imported once that hour closes rather than on the next shower.
+STATISTICS_IMPORT_MINUTE = 2
 
 
 class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
@@ -65,13 +72,19 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
         self._lifetime_total_water_ml = 0
         self._lifetime_shower_count = 0
         self._lifetime_last_session_id: int | None = None
+        self._imported_sessions: HaiImportedSessions | None = None
         self._persisted_last_seen_at: datetime | None = None
         self._last_logged_error: str | None = None
         self._history_sync_task: asyncio.Task[None] | None = None
         self._suspend_refresh_until: float = 0.0
+        self._statistics_lock = asyncio.Lock()
+        self._unsub_statistics_tick: CALLBACK_TYPE | None = None
+        self._unsub_advertisements: CALLBACK_TYPE | None = None
+        self._shut_down = False
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=entry,
             name=f"hai_shower_{address}",
             update_interval=timedelta(seconds=30),
         )
@@ -82,10 +95,45 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
         await self.client.async_initialize()
         await self._async_restore_usage_records()
         await self._async_subscribe_runtime_updates()
+        self._unsub_statistics_tick = async_track_utc_time_change(
+            self.hass,
+            self._async_handle_statistics_tick,
+            minute=STATISTICS_IMPORT_MINUTE,
+            second=0,
+        )
+        # Firmware version rides in the advertisement (the Hai app reads it
+        # there), so it is available without a GATT read the proxy refuses.
+        self._unsub_advertisements = bluetooth.async_register_callback(
+            self.hass,
+            self._handle_advertisement,
+            bluetooth.BluetoothCallbackMatcher(
+                address=self._address, connectable=False
+            ),
+            bluetooth.BluetoothScanningMode.PASSIVE,
+        )
+        last_info = bluetooth.async_last_service_info(
+            self.hass, self._address, connectable=False
+        )
+        if last_info is not None:
+            self.client.apply_advertisement(last_info.manufacturer_data)
 
     async def async_shutdown(self) -> None:
-        """Tear down the underlying BLE client."""
+        """Tear down the underlying BLE client.
 
+        Runs once: the base coordinator registers this as an unload callback
+        of the config entry, and setup failure and unload call it as well.
+        """
+
+        if self._shut_down:
+            return
+        self._shut_down = True
+        await super().async_shutdown()
+        if self._unsub_statistics_tick is not None:
+            self._unsub_statistics_tick()
+            self._unsub_statistics_tick = None
+        if self._unsub_advertisements is not None:
+            self._unsub_advertisements()
+            self._unsub_advertisements = None
         if self._history_sync_task is not None:
             self._history_sync_task.cancel()
             self._history_sync_task = None
@@ -172,11 +220,29 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
                 err,
             )
 
+    def _publish_state(self) -> None:
+        """Push client state to entities without rescheduling the poll.
+
+        ``async_set_updated_data`` reschedules the 30 s refresh, so pushing
+        every notification through it would starve the poll that reads flow
+        rate and battery.
+        """
+        self.data = self.client.state
+        self.async_update_listeners()
+
+    @callback
+    def _handle_advertisement(
+        self,
+        service_info: bluetooth.BluetoothServiceInfoBleak,
+        _change: bluetooth.BluetoothChange,
+    ) -> None:
+        """Pick up firmware version changes from advertisements."""
+        if self.client.apply_advertisement(service_info.manufacturer_data):
+            self._publish_state()
+
     def _handle_temperature_update(self, _value: int) -> None:
         """Push live temperature updates into Home Assistant."""
-        self.hass.loop.call_soon_threadsafe(
-            self.async_set_updated_data, self.client.state
-        )
+        self.hass.loop.call_soon_threadsafe(self._publish_state)
 
     def _handle_shower_end_trigger(self, record: HaiUsageRecord | None) -> None:
         """Publish the latest completed session and then schedule sync."""
@@ -186,7 +252,7 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
         """Apply a shower-end record preview before running full sync."""
         if record is not None:
             self._apply_shower_end_record(record, publish_live_session=True)
-            self.async_set_updated_data(self.client.state)
+            self._publish_state()
         self._schedule_history_sync()
 
     def _schedule_history_sync(self) -> None:
@@ -272,20 +338,51 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
             if self._stored_usage_records:
                 self._apply_usage_records(self._stored_usage_records)
             if synced_records:
-                try:
-                    await async_import_usage_records(
-                        self.hass,
-                        self._address,
-                        synced_records,
-                        statistic_identity=self._device_id,
-                    )
-                except Exception as stats_err:
-                    _LOGGER.debug(
-                        "Statistics import skipped for %s: %s",
-                        self._address,
-                        stats_err,
-                    )
-            self.async_set_updated_data(self.client.state)
+                await self._async_import_statistics(synced_records)
+            self._publish_state()
+
+    async def _async_handle_statistics_tick(self, _now: datetime) -> None:
+        """Import sessions whose hour has closed since the last import."""
+        if self._stored_usage_records:
+            await self._async_import_statistics()
+
+    async def _async_import_statistics(
+        self, synced_records: list[HaiUsageRecord] | None = None
+    ) -> None:
+        """Offer stored and freshly synced records to the statistics importer.
+
+        Passing the stored records alongside a sync lets the importer rebuild
+        the latest hourly bucket when a session for that hour turns up after
+        it was first written. Synced records are merged in uncapped so a
+        device history larger than the storage cap is still imported.
+        """
+        merged: dict[int, HaiUsageRecord] = {
+            self._usage_record_key(record): record
+            for record in self._stored_usage_records
+        }
+        for record in synced_records or ():
+            merged[self._usage_record_key(record)] = record
+        async with self._statistics_lock:
+            try:
+                imported_sessions = await async_import_usage_records(
+                    self.hass,
+                    self._address,
+                    list(merged.values()),
+                    statistic_identity=self._device_id,
+                    imported_sessions=self._imported_sessions,
+                )
+            except Exception as stats_err:
+                _LOGGER.debug(
+                    "Statistics import skipped for %s: %s",
+                    self._address,
+                    stats_err,
+                )
+                return
+            if imported_sessions != self._imported_sessions:
+                self._imported_sessions = imported_sessions
+                await self._usage_store.async_save_snapshot(
+                    self._usage_storage_key, self._usage_snapshot()
+                )
 
     async def async_trigger_history_sync(self) -> None:
         """Run a user-requested history sync immediately."""
@@ -322,18 +419,11 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
                 len(records),
                 self._address,
             )
-            snapshot = HaiUsageSnapshot(
-                records=repaired_records,
-                lifetime_total_water_ml=snapshot.lifetime_total_water_ml,
-                lifetime_shower_count=snapshot.lifetime_shower_count,
-                lifetime_last_session_id=snapshot.lifetime_last_session_id,
-                last_seen_at=snapshot.last_seen_at,
-            )
-            await self._usage_store.async_save_snapshot(
-                self._usage_storage_key, snapshot
-            )
+            # Tracking is keyed on the old, mis-decoded hours, so it is
+            # re-seeded by the rebuild below, or by the next import.
+            imported_sessions: HaiImportedSessions | None = None
             try:
-                await async_import_usage_records(
+                imported_sessions = await async_import_usage_records(
                     self.hass,
                     self._address,
                     repaired_records,
@@ -346,10 +436,22 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
                     self._address,
                     stats_err,
                 )
+            snapshot = HaiUsageSnapshot(
+                records=repaired_records,
+                lifetime_total_water_ml=snapshot.lifetime_total_water_ml,
+                lifetime_shower_count=snapshot.lifetime_shower_count,
+                lifetime_last_session_id=snapshot.lifetime_last_session_id,
+                last_seen_at=snapshot.last_seen_at,
+                imported_sessions=imported_sessions,
+            )
+            await self._usage_store.async_save_snapshot(
+                self._usage_storage_key, snapshot
+            )
         self._stored_usage_records = snapshot.records
         self._lifetime_total_water_ml = snapshot.lifetime_total_water_ml
         self._lifetime_shower_count = snapshot.lifetime_shower_count
         self._lifetime_last_session_id = snapshot.lifetime_last_session_id
+        self._imported_sessions = snapshot.imported_sessions
         if snapshot.last_seen_at is not None:
             self.client.state.last_seen_at = snapshot.last_seen_at
             self._persisted_last_seen_at = snapshot.last_seen_at
@@ -535,6 +637,7 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
             lifetime_shower_count=self._lifetime_shower_count,
             lifetime_last_session_id=self._lifetime_last_session_id,
             last_seen_at=self.client.state.last_seen_at,
+            imported_sessions=self._imported_sessions,
         )
 
     async def _async_maybe_persist_last_seen(self, *, force: bool = False) -> None:
