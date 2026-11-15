@@ -164,8 +164,9 @@ needed to read that characteristic. The firmware sensor is disabled by default.
 
 **History sync failing?**
 Check the integration diagnostics for details (`last_history_sync_result`,
-`last_history_sync_error`). If it persists, restart the ESPHome proxy and
-reload the integration.
+`last_history_sync_error`). A result of `partial` means some records arrived
+before the error; they are kept, and the next sync fills in the rest. If it
+persists, restart the ESPHome proxy and reload the integration.
 
 For more detail, see the
 [BLE troubleshooting guide](docs/troubleshooting_ble_proxy.md).

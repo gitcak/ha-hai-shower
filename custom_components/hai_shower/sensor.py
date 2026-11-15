@@ -51,8 +51,9 @@ def _shower_status(state: HaiShowerState) -> str:
     """Return a user-facing lifecycle state for dashboards.
 
     Only ``current_temp_centicelsius``/``current_flow_ml_per_sec`` are live,
-    self-clearing signals (reset to ``None`` at the top of every BLE poll in
-    ``ble.py``, see ``_read_temperature``/``_read_flow_rate``). Do NOT use
+    self-clearing signals (set to ``None`` by any BLE poll that reads no data,
+    see ``_read_temperature``/``_read_flow_rate``, and by the shower-end
+    notify, see ``_end_live_session`` in ``ble.py``). Do NOT use
     ``session_duration_seconds``/``session_volume_milliliters`` here: those
     are latched by the shower-end notify handler once a session *completes*
     and are never cleared afterwards, so treating their mere presence as

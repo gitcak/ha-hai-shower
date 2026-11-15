@@ -281,6 +281,9 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
         state.last_history_sync_result = "running"
         state.last_history_sync_error = None
         state.last_history_sync_records = 0
+        # Publish so the status sensor shows "syncing" for the duration of the
+        # transfer instead of holding its last value (often "running").
+        self._publish_state()
         existing_records = list(self._stored_usage_records)
         synced_records: list[HaiUsageRecord] = []
         newly_synced_records: list[HaiUsageRecord] = []
@@ -312,8 +315,11 @@ class HaiShowerCoordinator(DataUpdateCoordinator[HaiShowerState]):
                         },
                     )
             if self.client.state.lifecycle_state is HaiLifecycleState.ERROR:
-                state.last_history_sync_result = "error"
+                # Records received before a timeout/disconnect are still merged
+                # above; report that distinctly from a sync that got nothing.
+                state.last_history_sync_result = "partial" if synced_records else "error"
                 state.last_history_sync_error = self.client.state.last_error
+                state.last_history_sync_records = len(synced_records)
             elif synced_records:
                 state.last_history_sync_result = "success"
                 state.last_history_sync_records = len(synced_records)

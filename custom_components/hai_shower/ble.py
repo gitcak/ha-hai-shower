@@ -68,6 +68,35 @@ GATT_OPERATION_TIMEOUT_SECONDS = 10.0
 # The Hai app waits up to 120 s for the end-of-history marker (DeviceBloc
 # _syncShowerData races the transfer against _timeoutPromise(120)).
 HISTORY_SYNC_TIMEOUT_SECONDS = 120.0
+# Once records have started streaming, treat this much silence as end-of-log.
+# The device sends the whole log in well under a second; the zero-length end
+# marker has been observed to go missing (e.g. post-shower, via an ESPHome
+# proxy), which otherwise leaves the sync waiting the full 120 s timeout.
+HISTORY_SYNC_RECORD_IDLE_SECONDS = 5.0
+HISTORY_SYNC_POLL_INTERVAL_SECONDS = 0.5
+# Cap on the time step used when integrating live flow into session volume,
+# so a long gap between samples (e.g. a reconnect) can't inflate the total.
+LIVE_SESSION_MAX_INTEGRATION_STEP_SECONDS = 60.0
+# A live session with no telemetry for this long is treated as over, so the
+# next telemetry starts a new one. Covers showers whose end was never seen
+# (shower-end notify lost while disconnected, and no inferred end because the
+# notify subscriptions were already gone), which would otherwise count the
+# next shower's duration from the old start.
+LIVE_SESSION_STALE_SECONDS = 300.0
+# How long after the last good contact (successful poll or notify) a failed
+# read, failed poll or unexpected disconnect is treated as transient. ESPHome
+# proxies fail single GATT reads with status=133 and drop the link; the next
+# 30 s poll normally reconnects (observed outages: 30-40 s). Within this window
+# the client keeps its availability and last live temperature/flow instead of
+# going unavailable, which flipped status running -> idle -> running and left
+# gaps in history. Covers one more failed poll before giving up.
+TRANSIENT_FAILURE_GRACE_SECONDS = 90.0
+# After a shower-end notify, ignore live telemetry for this long. A reading
+# taken just before the water stopped (a poll read in flight, or a temperature
+# notify sent before subscriptions are torn down) would otherwise start a new
+# live session, overwrite the device's session totals with 0 and flip status
+# back to "running".
+SHOWER_END_QUIET_SECONDS = 10.0
 # Minimum spacing between RTC writes. The app never writes the clock on
 # connect (it writes cloud-supplied bytes after a history upload), so writing
 # on every 30 s poll reconnect only adds proxy traffic.
@@ -162,6 +191,19 @@ class HaiShowerBleClient:
         self._state = HaiShowerState()
         self._usage_records: list[HaiUsageRecord] = []
         self._history_done: asyncio.Event = asyncio.Event()
+        self._history_sync_active = False
+        self._history_aborted = False
+        self._history_last_record_monotonic: float | None = None
+        # Live-session tracking (see _update_live_session).
+        self._live_session_started_monotonic: float | None = None
+        self._live_session_last_sample_monotonic: float | None = None
+        self._live_session_volume_ml: float = 0.0
+        # Last successful poll or notify (see _in_failure_grace).
+        self._last_contact_monotonic: float | None = None
+        # Set when a temperature/flow read fails during the current refresh;
+        # such a poll does not renew the grace window (see async_refresh).
+        self._telemetry_read_failed = False
+        self._shower_end_monotonic: float | None = None
         self._operation_lock: asyncio.Lock = asyncio.Lock()
         self._skip_version_reads = False
         self._advertised_firmware: int | None = None
@@ -295,6 +337,45 @@ class HaiShowerBleClient:
             available=available,
         )
 
+    def _mark_contact(self) -> None:
+        """Record a successful poll or notify from the device."""
+        self._last_contact_monotonic = time.monotonic()
+
+    def _in_failure_grace(self) -> bool:
+        """Return True while a failure may be transient (see TRANSIENT_FAILURE_GRACE_SECONDS)."""
+        last = self._last_contact_monotonic
+        return last is not None and (
+            time.monotonic() - last <= TRANSIENT_FAILURE_GRACE_SECONDS
+        )
+
+    def _set_transient_error_state(
+        self, error: str, *, detail: HaiLifecycleDetail
+    ) -> None:
+        """Enter ERROR for a failure that may be transient.
+
+        Used by refresh, history sync and the disconnect callback. Within the
+        grace window availability and live telemetry are left as
+        they were, so a single proxy status=133 drop does not mark entities
+        unavailable or flip status to idle mid-shower. Past it, behave as
+        before: unavailable, with live telemetry cleared.
+        """
+        if self._in_failure_grace():
+            _LOGGER.debug(
+                "Treating %s on %s as transient (last contact %.0fs ago)",
+                error,
+                self.address,
+                time.monotonic() - (self._last_contact_monotonic or 0.0),
+            )
+            # available=None keeps the current value and does not bump
+            # last_seen_at.
+            self._transition_state(
+                HaiLifecycleState.ERROR, detail=detail, error=error
+            )
+            return
+        self._state.current_temp_centicelsius = None
+        self._state.current_flow_ml_per_sec = None
+        self._set_error_state(error, detail=detail, available=False)
+
     async def async_initialize(self) -> None:
         """Check BLE visibility."""
         self._transition_state(
@@ -358,6 +439,11 @@ class HaiShowerBleClient:
         self._client = None
         self._temperature_subscribed = False
         self._shower_end_subscribed = False
+        if self._history_sync_active and not self._history_done.is_set():
+            # Nothing more can arrive on a dropped link; wake the sync now
+            # instead of letting it sit out the full timeout.
+            self._history_aborted = True
+            self._history_done.set()
         if self._shutting_down:
             self._transition_state(
                 HaiLifecycleState.SETUP,
@@ -374,10 +460,9 @@ class HaiShowerBleClient:
         # re-pushes it defensively (issue #1 keeps expected idle disconnects
         # cached; only genuine drops invalidate).
         self._last_written_led_config = None
-        self._set_error_state(
+        self._set_transient_error_state(
             "ble_disconnected",
             detail=HaiLifecycleDetail.DISCONNECT_CALLBACK,
-            available=False,
         )
 
     async def _safe_disconnect(self, client: BleakClient | None) -> None:
@@ -557,7 +642,9 @@ class HaiShowerBleClient:
                 self._transition_state(
                     HaiLifecycleState.SETUP,
                     detail=HaiLifecycleDetail.REFRESH_CONNECTING,
-                    available=False,
+                    # Keep availability while reconnecting after a recent
+                    # transient drop (see _set_transient_error_state).
+                    available=None if self._in_failure_grace() else False,
                 )
             else:
                 self._transition_state(
@@ -565,6 +652,7 @@ class HaiShowerBleClient:
                     detail=HaiLifecycleDetail.REFRESH_READING,
                 )
             self._read_timed_out = False
+            self._telemetry_read_failed = False
             try:
                 client = await self._ensure_connected()
                 await self._read_battery(client)
@@ -618,6 +706,7 @@ class HaiShowerBleClient:
                         detail=HaiLifecycleDetail.RUNTIME_SUBSCRIPTION_IDLE_TIMEOUT,
                         available=True,
                     )
+                    self._end_live_session()
                     await self._reset_runtime_monitoring_locked()
                     if self._shower_end_callback:
                         self._shower_end_callback(None)
@@ -645,6 +734,11 @@ class HaiShowerBleClient:
                     detail=HaiLifecycleDetail.REFRESH_COMPLETE,
                     available=True,
                 )
+                if not self._telemetry_read_failed:
+                    # A poll whose temperature/flow read failed must not renew
+                    # the window that lets those reads hold their last value,
+                    # or a read that keeps failing could hold it forever.
+                    self._mark_contact()
                 # Disconnect after each poll when no notify subscriptions are
                 # active.  Holding an idle connection between polls causes the
                 # ESPHome proxy to drop it with status=133, which fires a
@@ -659,18 +753,16 @@ class HaiShowerBleClient:
             except BleakError as err:
                 _LOGGER.debug("BLE read failed for %s: %s", self.address, err)
                 await self._reset_connection()
-                self._set_error_state(
+                self._set_transient_error_state(
                     str(err),
                     detail=HaiLifecycleDetail.REFRESH_BLE_ERROR,
-                    available=False,
                 )
             except Exception as err:
                 _LOGGER.debug("Unexpected BLE error for %s: %s", self.address, err)
                 await self._reset_connection()
-                self._set_error_state(
+                self._set_transient_error_state(
                     str(err),
                     detail=HaiLifecycleDetail.REFRESH_UNEXPECTED_ERROR,
-                    available=False,
                 )
         return self._state
 
@@ -694,13 +786,13 @@ class HaiShowerBleClient:
     async def _read_temperature(self, client: BleakClient) -> None:
         """Read and decrypt water temperature."""
         char = UUIDS["water_temp"]
-        self._state.current_temp_centicelsius = None
+        # Assign once the read completes (see _read_flow_rate).
+        value: int | None = None
         try:
             raw = await self._read_char(client, char.characteristic)
             debug = decrypt_characteristic_debug(char.characteristic, raw, self._key)
             value = debug["value"]
             if value is not None:
-                self._state.current_temp_centicelsius = value
                 _LOGGER.debug(
                     "Temperature read on %s: value=%s cC raw_len=%s sliced_raw=%s decrypted=%s reversed=%s idle_zeros=%s payload=%s",
                     self.address,
@@ -725,17 +817,25 @@ class HaiShowerBleClient:
                 )
         except BleakError as err:
             _LOGGER.debug("Temperature read failed: %s", err)
+            self._telemetry_read_failed = True
+            if self._in_failure_grace():
+                # Hold the last reading through a transient read error.
+                value = self._state.current_temp_centicelsius
+        finally:
+            self._state.current_temp_centicelsius = value
 
     async def _read_flow_rate(self, client: BleakClient) -> None:
         """Read and decrypt water flow rate."""
         char = UUIDS["water_flow"]
-        self._state.current_flow_ml_per_sec = None
+        # Assign the result once the read completes. Clearing the field before
+        # awaiting the read let a temperature notify publish state mid-read,
+        # flashing the flow sensor to "unknown" on every poll.
+        value: int | None = None
         try:
             raw = await self._read_char(client, char.characteristic)
             debug = decrypt_characteristic_debug(char.characteristic, raw, self._key)
             value = debug["value"]
             if value is not None:
-                self._state.current_flow_ml_per_sec = value
                 _LOGGER.debug(
                     "Flow read on %s: value=%s mL/s raw_len=%s sliced_raw=%s decrypted=%s reversed=%s idle_zeros=%s payload=%s",
                     self.address,
@@ -760,6 +860,60 @@ class HaiShowerBleClient:
                 )
         except BleakError as err:
             _LOGGER.debug("Flow rate read failed: %s", err)
+            self._telemetry_read_failed = True
+            if self._in_failure_grace():
+                # Hold the last reading through a transient read error.
+                value = self._state.current_flow_ml_per_sec
+        finally:
+            self._state.current_flow_ml_per_sec = value
+            self._update_live_session()
+
+    def _update_live_session(self) -> None:
+        """Advance live-session duration/volume from current telemetry.
+
+        ``session_duration_seconds``/``session_volume_milliliters`` back the
+        "Current session" sensors. They used to be written only by the
+        shower-end notify, so during a shower they kept showing the previous
+        session. Track the running session here; the shower-end record then
+        overwrites both with the device's authoritative totals.
+        """
+        state = self._state
+        if state.current_temp_centicelsius is None and state.current_flow_ml_per_sec is None:
+            return
+        now = time.monotonic()
+        ended = self._shower_end_monotonic
+        if (
+            self._live_session_started_monotonic is None
+            and ended is not None
+            and now - ended < SHOWER_END_QUIET_SECONDS
+        ):
+            # A late reading from the shower that just ended (see
+            # SHOWER_END_QUIET_SECONDS): drop it.
+            state.current_temp_centicelsius = None
+            state.current_flow_ml_per_sec = None
+            return
+        last = self._live_session_last_sample_monotonic
+        if self._live_session_started_monotonic is None or (
+            last is not None and now - last > LIVE_SESSION_STALE_SECONDS
+        ):
+            self._live_session_started_monotonic = now
+            self._live_session_volume_ml = 0.0
+            last = now
+        flow = state.current_flow_ml_per_sec
+        if flow is not None and last is not None:
+            step = min(now - last, LIVE_SESSION_MAX_INTEGRATION_STEP_SECONDS)
+            self._live_session_volume_ml += flow * max(step, 0.0)
+        self._live_session_last_sample_monotonic = now
+        state.session_duration_seconds = int(now - self._live_session_started_monotonic)
+        state.session_volume_milliliters = int(self._live_session_volume_ml)
+
+    def _end_live_session(self) -> None:
+        """Stop live-session tracking and clear live telemetry."""
+        self._live_session_started_monotonic = None
+        self._live_session_last_sample_monotonic = None
+        self._live_session_volume_ml = 0.0
+        self._state.current_temp_centicelsius = None
+        self._state.current_flow_ml_per_sec = None
 
     async def _read_version(self, client: BleakClient) -> None:
         """Read and decrypt firmware version."""
@@ -919,6 +1073,8 @@ class HaiShowerBleClient:
             value = debug["value"]
             if value is not None:
                 self._state.current_temp_centicelsius = value
+                self._mark_contact()
+                self._update_live_session()
                 self._transition_state(
                     HaiLifecycleState.MONITORING,
                     detail=HaiLifecycleDetail.TEMPERATURE_NOTIFY,
@@ -980,6 +1136,7 @@ class HaiShowerBleClient:
             _sender: BleakGATTCharacteristic, data: bytearray
         ) -> None:
             payload = bytes(data)
+            self._mark_contact()
             self._state.last_shower_end_notified_at = datetime.now(UTC)
             self._state.last_shower_end_payload_hex = payload.hex()
             self._state.last_shower_end_payload_len = len(payload)
@@ -1003,6 +1160,11 @@ class HaiShowerBleClient:
                 self._state.last_session_avg_temp_cc = (
                     record.average_temp_centicelsius
                 )
+            # The water is off: drop live telemetry so status leaves "running"
+            # now rather than after the post-shower history sync and the next
+            # poll (previously ~2 min of stale "running" + last flow value).
+            self._end_live_session()
+            self._shower_end_monotonic = time.monotonic()
             self._transition_state(
                 HaiLifecycleState.MONITORING,
                 detail=HaiLifecycleDetail.SHOWER_END_TRIGGER,
@@ -1035,11 +1197,15 @@ class HaiShowerBleClient:
             previous_last_usage_record = self._state.last_usage_record
             self._usage_records = []
             self._history_done.clear()
+            self._history_aborted = False
+            self._history_last_record_monotonic = None
             if not (self._client and self._client.is_connected):
                 self._transition_state(
                     HaiLifecycleState.SETUP,
                     detail=HaiLifecycleDetail.HISTORY_SYNC_CONNECTING,
-                    available=False,
+                    # As in async_refresh: keep availability while connecting
+                    # shortly after good contact.
+                    available=None if self._in_failure_grace() else False,
                 )
             else:
                 self._transition_state(
@@ -1060,10 +1226,9 @@ class HaiShowerBleClient:
                 client = await self._ensure_connected()
             except BleakError as err:
                 await self._reset_connection()
-                self._set_error_state(
+                self._set_transient_error_state(
                     str(err),
                     detail=HaiLifecycleDetail.HISTORY_SYNC_CONNECT_BLE_ERROR,
-                    available=False,
                 )
                 raise
 
@@ -1078,6 +1243,7 @@ class HaiShowerBleClient:
             def _on_record(
                 _sender: BleakGATTCharacteristic, data: bytearray
             ) -> None:
+                self._mark_contact()
                 if not data:
                     _LOGGER.debug("History sync end marker received")
                     self._history_done.set()
@@ -1086,6 +1252,7 @@ class HaiShowerBleClient:
                     record = parse_usage_record(bytes(data), key=self._key)
                     if record:
                         self._usage_records.append(record)
+                        self._history_last_record_monotonic = time.monotonic()
                         # Do NOT write session_duration_seconds/volume here.
                         # These are *historical* records from the device's log;
                         # populating live-session fields from them produces a
@@ -1107,41 +1274,62 @@ class HaiShowerBleClient:
                     _LOGGER.warning("Bad usage record: %s", err)
 
             try:
+                # Set before any GATT I/O so a disconnect at any point in the
+                # transfer wakes the wait below (see _handle_disconnect).
+                self._history_sync_active = True
                 await self._notify_start(client, usage.characteristic, _on_record)
                 await self._write_char(
                     client, trigger.characteristic, b"\x00", response=True
                 )
                 _LOGGER.debug("History sync triggered on %s", self.address)
-                await asyncio.wait_for(
-                    self._history_done.wait(), timeout=HISTORY_SYNC_TIMEOUT_SECONDS
-                )
+                await self._wait_for_history_end()
+                if self._history_aborted:
+                    _LOGGER.warning(
+                        "History sync on %s interrupted by disconnect after %d "
+                        "records; keeping records received so far",
+                        self.address,
+                        len(self._usage_records),
+                    )
             except TimeoutError:
-                _LOGGER.warning("History sync timed out on %s", self.address)
-                self._usage_records = []
-                self._set_error_state(
-                    "history_sync_timeout",
-                    detail=HaiLifecycleDetail.HISTORY_SYNC_TIMEOUT,
-                    available=client.is_connected,
+                # Keep whatever arrived: records are parsed individually and
+                # merged by session_id, so a partial log is still correct.
+                # Discarding it rolled "last shower"/count/total back to the
+                # previous session.
+                _LOGGER.warning(
+                    "History sync timed out on %s after %d records; keeping "
+                    "records received so far",
+                    self.address,
+                    len(self._usage_records),
                 )
+                if client.is_connected:
+                    self._set_error_state(
+                        "history_sync_timeout",
+                        detail=HaiLifecycleDetail.HISTORY_SYNC_TIMEOUT,
+                        available=True,
+                    )
+                else:
+                    self._set_transient_error_state(
+                        "history_sync_timeout",
+                        detail=HaiLifecycleDetail.HISTORY_SYNC_TIMEOUT,
+                    )
             except BleakError as err:
                 _LOGGER.debug("History sync failed for %s: %s", self.address, err)
                 await self._reset_connection()
-                self._set_error_state(
+                self._set_transient_error_state(
                     str(err),
                     detail=HaiLifecycleDetail.HISTORY_SYNC_BLE_ERROR,
-                    available=False,
                 )
             except Exception as err:
                 _LOGGER.debug(
                     "Unexpected history sync error for %s: %s", self.address, err
                 )
                 await self._reset_connection()
-                self._set_error_state(
+                self._set_transient_error_state(
                     str(err),
                     detail=HaiLifecycleDetail.HISTORY_SYNC_UNEXPECTED_ERROR,
-                    available=False,
                 )
             finally:
+                self._history_sync_active = False
                 try:
                     if client and client.is_connected:
                         await self._notify_stop(client, usage.characteristic)
@@ -1159,10 +1347,15 @@ class HaiShowerBleClient:
                 self._state.usage_records = previous_usage_records
                 self._state.last_usage_record = previous_last_usage_record
             if self._state.lifecycle_state is HaiLifecycleState.SYNCING:
+                connected = bool(client and client.is_connected)
                 self._transition_state(
                     HaiLifecycleState.MONITORING,
                     detail=HaiLifecycleDetail.HISTORY_SYNC_COMPLETE,
-                    available=bool(client and client.is_connected),
+                    available=(
+                        True
+                        if connected
+                        else (None if self._in_failure_grace() else False)
+                    ),
                 )
             elif self._state.lifecycle_state is HaiLifecycleState.ERROR:
                 _LOGGER.debug(
@@ -1171,6 +1364,37 @@ class HaiShowerBleClient:
                     self._state.lifecycle_detail,
                 )
             return self._usage_records
+
+    async def _wait_for_history_end(self) -> None:
+        """Wait for the end marker, a disconnect, or a post-record idle gap.
+
+        Raises ``TimeoutError`` if nothing ends the transfer within
+        ``HISTORY_SYNC_TIMEOUT_SECONDS``.
+        """
+        deadline = time.monotonic() + HISTORY_SYNC_TIMEOUT_SECONDS
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            try:
+                await asyncio.wait_for(
+                    self._history_done.wait(),
+                    timeout=min(HISTORY_SYNC_POLL_INTERVAL_SECONDS, remaining),
+                )
+                return
+            except TimeoutError:
+                last = self._history_last_record_monotonic
+                if last is not None and (
+                    time.monotonic() - last >= HISTORY_SYNC_RECORD_IDLE_SECONDS
+                ):
+                    _LOGGER.debug(
+                        "History sync on %s: no end marker, but no records for "
+                        "%.0fs after %d records; treating as complete",
+                        self.address,
+                        HISTORY_SYNC_RECORD_IDLE_SECONDS,
+                        len(self._usage_records),
+                    )
+                    return
 
     def _raise_if_disconnected(self, client: BleakClient) -> None:
         """Stop a refresh as soon as the client drops or a read hangs."""
